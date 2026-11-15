@@ -59,7 +59,7 @@ async function sendEmail(to: string, subject: string, text: string) {
     if (!r.ok) console.warn('resend', r.status, await r.text());
   } catch (e) { console.warn('resend error', e); }
 }
-type Member = { id: string; business_id: string; user_id: string | null; department_id: string | null; name: string; email: string; role: string; job: string | null; active: boolean; skills: string[]; _dev?: boolean };
+type Member = { id: string; business_id: string; user_id: string | null; department_id: string | null; name: string; email: string; role: string; job: string | null; active: boolean; skills: string[]; _dev?: boolean; _imp?: boolean };
 async function notify(m: Member | undefined, text: string, subject?: string) {
   if (!m) return;
   await db.from('notifications').insert({ business_id: m.business_id, member_id: m.id, text });
@@ -252,14 +252,17 @@ async function devReadsNotes() {
   return r ? r.value === true : false;
 }
 // note riservate: solo responsabile/sostituto del team (e lo sviluppatore finché l'impostazione è attiva)
+// solo il responsabile (o sostituto) del team; in "Vedi come" lo sviluppatore le vede solo se l'impostazione lo consente
+async function needNotesFor(me: Me, dp: any) {
+  if (!schedulesDept(me, dp)) fail(403, 'Queste informazioni sono riservate al responsabile del team.');
+  if (me._imp && !(await devReadsNotes())) fail(403, 'Accesso dello sviluppatore alle note disattivato.');
+}
 async function needNotesAccess(me: Me | null, memberId: string) {
   needMember(me);
   const m = (await q(db.from('members').select('*').eq('id', memberId).eq('business_id', me.business_id)) as Member[])[0];
   if (!m) fail(404, 'Persona non trovata.');
   const dp = await deptRow(me, m.department_id);
-  if (schedulesDept(me, dp)) return { m, dp };
-  if (me._dev && await devReadsNotes()) return { m, dp };
-  fail(403, 'Queste informazioni sono riservate al responsabile del team.');
+  await needNotesFor(me, dp);
   return { m, dp };
 }
 const RULE_KINDS = ['avoid_shift', 'prefer_shift', 'only_shifts', 'max_per_month', 'unavailable_weekday', 'avoid_weekday'];
@@ -653,7 +656,7 @@ H.save_needs = async (me, p) => {
 H.team_personal = async (me, p) => {
   needMember(me);
   const dp = await deptRow(me, p.department_id); if (!dp) fail(400, 'Team non valido.');
-  if (!(schedulesDept(me, dp) || (me._dev && await devReadsNotes()))) fail(403, 'Queste informazioni sono riservate al responsabile del team.');
+  await needNotesFor(me, dp);
   const ms = (await q(db.from('members').select('id').eq('department_id', dp.id).eq('active', true)) as any[]).map((x) => x.id).concat(['00000000-0000-0000-0000-000000000000']);
   const [notes, rules, prefs] = await Promise.all([
     q(db.from('manager_notes').select('*').in('member_id', ms).order('created_at', { ascending: false })),
@@ -840,7 +843,7 @@ Deno.serve(async (req) => {
       await needDev(user);
       me = (await q(db.from('members').select('*').eq('id', body.as_member).eq('active', true)) as Member[])[0] || null;
       if (!me) fail(404, 'Persona non trovata.');
-      me._dev = true;
+      me._dev = true; me._imp = true;
     } else {
       const rows = await q(db.from('members').select('*').eq('user_id', user.id).eq('active', true)) as Member[];
       if (!rows.length) fail(403, 'Il tuo account non è collegato a nessuna attività.');
