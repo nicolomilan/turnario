@@ -268,7 +268,20 @@ textarea{min-height:96px;resize:vertical;line-height:1.45}
 /* ===== Configurazione Supabase (chiave pubblica: sicura nel browser, i dati sono protetti dalle regole RLS) ===== */
 const SUPABASE_URL='https://tsqxwhfdkqaychjdggvs.supabase.co';
 const SUPABASE_KEY='sb_publishable_AuehOlLIRjVW6EGPB8bCmA_PgxtrE3f';
-const sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+// Avvio sicuro: se la libreria non si carica o qualcosa si blocca, mostro un messaggio chiaro invece di "Caricamento…" infinito
+const BOOT={step:'avvio',t0:Date.now(),done:false};
+function showFatal(msg){
+  const app=document.getElementById('app');if(!app)return;
+  app.innerHTML=`<div class="auth"><div class="hero"><h1 style="font-size:30px">Qualcosa non è partito</h1><p>${String(msg||'Errore sconosciuto').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</p><p style="font-size:13px;opacity:.7">Passaggio: ${BOOT.step}</p></div>
+  <div class="card" style="display:grid;gap:10px"><button class="primary" onclick="location.reload()">Riprova</button><button class="ghost" onclick="hardLogout()">Esci e rientra</button></div></div>`;
+}
+function hardLogout(){try{Object.keys(localStorage).filter(k=>k.startsWith('sb-')).forEach(k=>localStorage.removeItem(k))}catch(e){}location.href=location.pathname}
+window.addEventListener('error',e=>{if(!BOOT.done)showFatal(e.message)});
+window.addEventListener('unhandledrejection',e=>{if(!BOOT.done)showFatal((e.reason&&e.reason.message)||String(e.reason))});
+setTimeout(()=>{if(!BOOT.done)showFatal('Il caricamento non si è completato. Controlla la connessione e riprova.')},15000);
+if(!window.supabase)throw new Error('Non riesco a caricare i componenti del sito. Controlla la connessione e riprova.');
+// lock disattivato: su Safari per iPhone il lock del browser a volte blocca l'accesso all'avvio
+const sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false,lock:async(_n,_t,fn)=>await fn()}});
 
 const MESI=['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
 const GG=['Dom','Lun','Mar','Mer','Gio','Ven','Sab'];
@@ -333,7 +346,7 @@ function busy(on){ui.busy+=on?1:-1;document.getElementById('busy').className=ui.
 async function api(action,payload={}){
   busy(true);
   try{
-    const {data:{session:s}}=await sb.auth.getSession();
+    const s=session||(await sb.auth.getSession()).data.session;
     const r=await fetch(`${SUPABASE_URL}/functions/v1/api`,{method:'POST',headers:{'Content-Type':'application/json',apikey:SUPABASE_KEY,...(s?{Authorization:'Bearer '+s.access_token}:{})},body:JSON.stringify({action,...payload,...(ui.asMember&&!action.startsWith('dev_')?{as_member:ui.asMember}:{})})});
     const j=await r.json().catch(()=>({error:'Risposta non valida dal server.'}));
     if(!r.ok)throw new Error(j.error||'Errore '+r.status);
@@ -344,12 +357,14 @@ async function sel(p){const{data,error}=await p;if(error)throw new Error(error.m
 async function loadAll(){
   busy(true);
   try{
-    const uid=session.user.id;
+    const uid=session.user.id;BOOT.step='verifica account';
     if(ui.dev===undefined){try{const r=await api('dev_status');ui.dev=!!r.dev;ui.devNotes=r.dev_reads_notes}catch(e){ui.dev=false}}
     let me=null;
     if(ui.dev&&ui.asMember){me=(await sel(sb.from('members').select('*').eq('id',ui.asMember).eq('active',true)))[0]||null;if(!me)ui.asMember=null}
     if(!me&&!(ui.dev&&ui.devHome))me=(await sel(sb.from('members').select('*').eq('user_id',uid).eq('active',true)))[0]||null;
-    if(!me){if(ui.dev){await loadDev();ui.view='dev';return}D=null;ui.view='nobiz';return}
+    BOOT.step='profilo';
+    if(!me){if(ui.dev){BOOT.step='hotel sviluppatore';await loadDev();ui.view='dev';return}D=null;ui.view='nobiz';return}
+    BOOT.step='dati del mese';
     const b=me.business_id;
     const [business,departments,shifts,members,months,needs]=await Promise.all([
       sel(sb.from('businesses').select('*').eq('id',b).single()),
@@ -417,7 +432,8 @@ function badge(){
   return todo+Math.max(pendingOffersForMe().length,un);
 }
 
-function render(){
+function render(){try{_render();if(document.querySelector('#app .splash')==null)BOOT.done=true}catch(e){console.error(e);showFatal(e.message)}}
+function _render(){
   const app=document.getElementById('app');
   if(ui.view==='login')return app.innerHTML=vLogin();
   if(ui.view==='signup')return app.innerHTML=vSignup();
@@ -708,7 +724,7 @@ document.addEventListener('submit',async ev=>{
 sb.auth.onAuthStateChange((evt,s)=>{
   const was=session&&session.user.id;session=s;
   if(s&&(evt==='SIGNED_IN'||evt==='INITIAL_SESSION')&&was!==s.user.id){
-    setTimeout(async()=>{try{await loadAll();subscribe()}catch(e){toast(e.message)}render()},0);
+    BOOT.step='accesso';setTimeout(async()=>{try{await loadAll();subscribe();render()}catch(e){console.error(e);if(D)render();else showFatal(e.message)}},0);
   }
   if(!s){session=null;D=null;ui.dev=undefined;ui.asMember=null;ui.devHome=false;if(['app','nobiz','dev'].includes(ui.view))ui.view=location.hash==='#sviluppatore'?'devboot':'login';render()}
 });
@@ -834,7 +850,7 @@ function parseSentence(t,depId){
 // divide il testo per persona: ogni frase va alla persona nominata (o all'ultima nominata)
 function parseNotes(text,people,forced){
   const out=new Map();let cur=forced||null;
-  const sents=text.split(/(?<=[.!?;\n])\s+|\n+/).map(x=>x.trim()).filter(Boolean);
+  const sents=text.replace(/([.!?;])\s+/g,'$1\n').split(/\n+/).map(x=>x.trim()).filter(Boolean);
   for(const raw of sents){const t=norm(raw);
     if(!forced){let best=null,bp=1e9;people.forEach(p=>{const parts=norm(p.name).split(' ');for(const k of [norm(p.name),parts[0],parts[parts.length-1]]){const m=new RegExp('\\b'+k+'\\b').exec(t);if(m&&m.index<bp){bp=m.index;best=p}}});if(best)cur=best}
     if(!cur)continue;
