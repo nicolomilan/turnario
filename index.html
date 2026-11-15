@@ -272,6 +272,7 @@ const SUPABASE_KEY='sb_publishable_AuehOlLIRjVW6EGPB8bCmA_PgxtrE3f';
 const BOOT={step:'avvio',t0:Date.now(),done:false};
 function showFatal(msg){
   const app=document.getElementById('app');if(!app)return;
+  if(BOOT.err)return;BOOT.err=msg;
   app.innerHTML=`<div class="auth"><div class="hero"><h1 style="font-size:30px">Qualcosa non è partito</h1><p>${String(msg||'Errore sconosciuto').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</p><p style="font-size:13px;opacity:.7">Passaggio: ${BOOT.step}</p></div>
   <div class="card" style="display:grid;gap:10px"><button class="primary" onclick="location.reload()">Riprova</button><button class="ghost" onclick="hardLogout()">Esci e rientra</button></div></div>`;
 }
@@ -721,13 +722,15 @@ document.addEventListener('submit',async ev=>{
 });
 
 /* ===== avvio ===== */
-sb.auth.onAuthStateChange((evt,s)=>{
+// parte solo quando TUTTO il codice della pagina è caricato (su iPhone l'accesso può rispondere prima)
+function startAuth(){sb.auth.onAuthStateChange((evt,s)=>{
   const was=session&&session.user.id;session=s;
   if(s&&(evt==='SIGNED_IN'||evt==='INITIAL_SESSION')&&was!==s.user.id){
     BOOT.step='accesso';setTimeout(async()=>{try{await loadAll();subscribe();render()}catch(e){console.error(e);if(D)render();else showFatal(e.message)}},0);
   }
   if(!s){session=null;D=null;ui.dev=undefined;ui.asMember=null;ui.devHome=false;if(['app','nobiz','dev'].includes(ui.view))ui.view=location.hash==='#sviluppatore'?'devboot':'login';render()}
-});
+})}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',startAuth);else setTimeout(startAuth,0);
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&D)scheduleReload()});
 </script>
 <script>
