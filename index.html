@@ -10,6 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <title>Turnario — Turni per hotel e ristoranti</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <style>
 /* ===== Turnario · Liquid Glass ===== */
 :root{
@@ -234,6 +236,26 @@ table.grid{border-collapse:separate;border-spacing:0;font-size:12px}
 @media (min-width:900px){main{padding-top:24px}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 @supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){:root{--glass:rgba(255,255,255,.92)}}
+
+.impbar{position:sticky;top:calc(max(8px,env(safe-area-inset-top)) + 64px);z-index:19;margin:8px 12px 0;display:flex;align-items:center;gap:8px;padding:8px 8px 8px 14px;border-radius:999px;background:rgba(255,159,10,.18);border:1px solid rgba(255,159,10,.35);font-size:13.5px}
+.impbar span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#map{height:380px;border-radius:var(--r-lg);overflow:hidden;margin-bottom:12px;z-index:1}
+.leaflet-popup-content-wrapper{border-radius:14px}
+.leaflet-popup-content{font:14px/1.4 var(--font);margin:12px 14px}
+.lock{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:var(--warn);background:var(--warn-soft);padding:4px 10px;border-radius:999px;margin-bottom:12px}
+.rule{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;padding:5px 6px 5px 11px;border-radius:999px;background:var(--info-soft);color:var(--info);margin:0 6px 6px 0}
+.rule.pref{background:var(--glass-soft);color:var(--ink2);border:1px solid var(--hair)}
+.rule.hard{background:var(--bad-soft);color:var(--bad)}
+.rule button{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:12px;opacity:.7}
+.quote{border-left:3px solid var(--hair);padding:4px 0 4px 12px;margin:8px 0;color:var(--ink2);font-size:14.5px}
+.pcard{border-top:1px solid var(--hair);padding:14px 0}
+.pcard:first-of-type{border-top:0;padding-top:4px}
+textarea{min-height:96px;resize:vertical;line-height:1.45}
+.hotel{display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--hair);flex-wrap:wrap}
+.hotel:first-of-type{border-top:0}
+.needrow{display:grid;grid-template-columns:1.3fr 1fr .7fr auto;gap:6px;align-items:center;margin-bottom:6px}
+.needrow input,.needrow select{min-height:40px;padding:8px 10px;font-size:15px}
+.skill{display:inline-block;font-size:11.5px;font-weight:600;padding:2px 8px;border-radius:999px;background:var(--glass-soft);border:1px solid var(--hair);margin-left:4px;color:var(--ink2)}
 </style>
 </head>
 <body>
@@ -259,7 +281,7 @@ const addD=(s,k)=>{const t=new Date(s+'T12:00:00Z');t.setUTCDate(t.getUTCDate()+
 const monthLabel=m=>{const[y,mo]=m.split('-').map(Number);return`${MESI[mo-1]} ${y}`};
 
 /* ===== stato ===== */
-const ui={view:'login',tab:null,dept:null,month:null,draft:null,err:'',busy:0};
+const ui={view:location.hash==='#sviluppatore'?'devboot':'login',tab:null,dept:null,month:null,draft:null,err:'',busy:0};
 let D=null; // dati caricati
 let session=null, channel=null;
 
@@ -284,7 +306,12 @@ const target=()=>{const n=daysIn();return n-Math.round(n*rules().restPerWeek/7)}
 const seqOf=id=>{const n=daysIn(),s=Array(n).fill('R');D.assignments.forEach(a=>{if(a.member_id===id&&inMonth(a.day))s[idxOf(a.day)]=a.code});return s};
 const worked=id=>seqOf(id).filter(x=>x!=='R').length;
 const isMgr=()=>D&&D.me.role==='manager';
-const employees=depId=>D.members.filter(m=>m.active&&m.role==='employee'&&(!depId||m.department_id===depId));
+const employees=depId=>D.members.filter(m=>m.active&&(depId?m.department_id===depId:m.role==='employee'));
+// organigramma: chi fa i turni di quale team
+const myTeams=()=>D?D.departments.filter(d=>d.scheduler_id===D.me.id||d.deputy_id===D.me.id):[];
+const editableTeams=()=>isMgr()?D.departments:myTeams();
+const canEditTeam=depId=>editableTeams().some(d=>d.id===depId);
+const canEditMember=id=>{const m=mem(id);return !!m&&canEditTeam(m.department_id)};
 const initials=n=>n.split(' ').map(x=>x[0]).slice(0,2).join('').toUpperCase();
 const AVC=['#1F4E46','#9A3412','#1E40AF','#6D28D9','#0E7490','#A21CAF','#4D7C0F','#B45309'];
 const avColor=id=>{let x=0;for(const c of String(id))x=(x*31+c.charCodeAt(0))|0;return AVC[Math.abs(x)%AVC.length]};
@@ -307,7 +334,7 @@ async function api(action,payload={}){
   busy(true);
   try{
     const {data:{session:s}}=await sb.auth.getSession();
-    const r=await fetch(`${SUPABASE_URL}/functions/v1/api`,{method:'POST',headers:{'Content-Type':'application/json',apikey:SUPABASE_KEY,...(s?{Authorization:'Bearer '+s.access_token}:{})},body:JSON.stringify({action,...payload})});
+    const r=await fetch(`${SUPABASE_URL}/functions/v1/api`,{method:'POST',headers:{'Content-Type':'application/json',apikey:SUPABASE_KEY,...(s?{Authorization:'Bearer '+s.access_token}:{})},body:JSON.stringify({action,...payload,...(ui.asMember&&!action.startsWith('dev_')?{as_member:ui.asMember}:{})})});
     const j=await r.json().catch(()=>({error:'Risposta non valida dal server.'}));
     if(!r.ok)throw new Error(j.error||'Errore '+r.status);
     return j;
@@ -318,28 +345,32 @@ async function loadAll(){
   busy(true);
   try{
     const uid=session.user.id;
-    const me=(await sel(sb.from('members').select('*').eq('user_id',uid).eq('active',true)))[0];
-    if(!me){D=null;ui.view='nobiz';return}
+    if(ui.dev===undefined){try{const r=await api('dev_status');ui.dev=!!r.dev;ui.devNotes=r.dev_reads_notes}catch(e){ui.dev=false}}
+    let me=null;
+    if(ui.dev&&ui.asMember){me=(await sel(sb.from('members').select('*').eq('id',ui.asMember).eq('active',true)))[0]||null;if(!me)ui.asMember=null}
+    if(!me&&!(ui.dev&&ui.devHome))me=(await sel(sb.from('members').select('*').eq('user_id',uid).eq('active',true)))[0]||null;
+    if(!me){if(ui.dev){await loadDev();ui.view='dev';return}D=null;ui.view='nobiz';return}
     const b=me.business_id;
-    const [business,departments,shifts,members,months]=await Promise.all([
+    const [business,departments,shifts,members,months,needs]=await Promise.all([
       sel(sb.from('businesses').select('*').eq('id',b).single()),
       sel(sb.from('departments').select('*').eq('business_id',b).order('position').order('name')),
       sel(sb.from('shift_types').select('*').eq('business_id',b).order('position').order('code')),
       sel(sb.from('members').select('*').eq('business_id',b).order('name')),
-      sel(sb.from('months').select('month').eq('business_id',b).order('month'))]);
+      sel(sb.from('months').select('month').eq('business_id',b).order('month')),
+      sel(sb.from('shift_needs').select('*').eq('business_id',b))]);
     const ms=months.map(x=>x.month.slice(0,7));
     if(!ui.month){const cur=todayStr().slice(0,7);ui.month=ms.includes(cur)?cur:(ms.find(m=>m>cur)||ms[ms.length-1]||(isMgrRole(me)?monthAdd(cur,1):cur))}
     const from=`${ui.month}-01`,to=`${ui.month}-${pad(new Date(+ui.month.slice(0,4),+ui.month.slice(5,7),0).getDate())}`;
     const [assignments,days,offers,notifs,log]=await Promise.all([
-      sel(sb.from('assignments').select('member_id,day,code').eq('business_id',b).gte('day',addD(from,-7)).lte('day',addD(to,7))),
+      sel(sb.from('assignments').select('member_id,day,code,skill').eq('business_id',b).gte('day',addD(from,-7)).lte('day',addD(to,7))),
       sel(sb.from('request_days').select('*').eq('business_id',b).gte('day',from).lte('day',to)),
       sel(sb.from('offers').select('*').eq('business_id',b).or(`and(day.gte.${from},day.lte.${to}),status.eq.pending`)),
       sel(sb.from('notifications').select('*').eq('member_id',me.id).order('created_at',{ascending:false}).limit(30)),
-      me.role==='manager'?sel(sb.from('audit_log').select('*').eq('business_id',b).order('created_at',{ascending:false}).limit(30)):Promise.resolve([])]);
+      (me.role==='manager'||departments.some(d=>d.scheduler_id===me.id||d.deputy_id===me.id))?sel(sb.from('audit_log').select('*').eq('business_id',b).order('created_at',{ascending:false}).limit(30)):Promise.resolve([])]);
     const reqIds=[...new Set(days.map(x=>x.request_id).concat(offers.map(o=>o.request_id)))];
     const requests=reqIds.length?await sel(sb.from('requests').select('*').in('id',reqIds).order('created_at',{ascending:false})):[];
-    D={me,business,departments,shifts,members,months:ms,assignments,days,offers,notifs,log,requests};
-    if(!ui.dept||!dept(ui.dept))ui.dept=(departments[0]||{}).id;
+    D={me,business,departments,shifts,members,months:ms,assignments,days,offers,notifs,log,requests,needs};
+    if(!ui.dept||!dept(ui.dept)||!canEditTeam(ui.dept))ui.dept=(editableTeams()[0]||departments[0]||{}).id;
     ui.view='app';
   }finally{busy(false)}
 }
@@ -366,6 +397,9 @@ const I={
  inbox:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13l2.5-8h11L20 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><path d="M4 13h4.5l1 2.5h5l1-2.5H20"/></svg>',
  users:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.5 3.4-5.5 6.5-5.5s5.7 2 6.5 5.5"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18.5 14.8c1.5.9 2.6 2.6 3 5.2"/></svg>',
  cog:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>',
+ spark:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>',
+ heart:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/></svg>',
+ pin:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 21s-6-5.6-6-11a6 6 0 0 1 12 0c0 5.4-6 11-6 11z"/><circle cx="12" cy="10" r="2.2"/></svg>',
  user:'<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4.2-6 8-6s7 2 8 6"/></svg>'};
 const LOGO='<svg width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4FA3FF"/><stop offset="1" stop-color="#0057D9"/></linearGradient></defs><rect x="1" y="1" width="30" height="30" rx="9" fill="url(#lg)"/><rect x="1.5" y="1.5" width="29" height="29" rx="8.5" fill="none" stroke="#fff" stroke-opacity=".35"/><rect x="8" y="10" width="7" height="5.5" rx="2" fill="#fff"/><rect x="17" y="10" width="7" height="5.5" rx="2" fill="#fff" opacity=".55"/><rect x="8" y="17.5" width="7" height="5.5" rx="2" fill="#fff" opacity=".55"/><rect x="17" y="17.5" width="7" height="5.5" rx="2" fill="#FFD60A"/></svg>';
 const ST={pending:['In attesa di un collega','warn'],claiming:['In aggiornamento','warn'],awaiting_manager:['In attesa del responsabile','warn'],approved:['Approvato','ok'],failed:['Nessun collega disponibile','bad'],already:['Era già riposo',''],cancelled:['Annullata',''],rejected:['Rifiutata dal responsabile','bad'],handled:['Gestita dal responsabile','']};
@@ -379,8 +413,8 @@ const closeModal=()=>document.getElementById('modal').innerHTML='';
 function pendingOffersForMe(){return D.offers.filter(o=>o.to_member===D.me.id&&o.status==='pending')}
 function badge(){
   const un=D.notifs.filter(n=>!n.read).length;
-  if(isMgr())return D.days.filter(x=>x.status==='awaiting_manager'||x.status==='failed').length+un;
-  return Math.max(pendingOffersForMe().length,un);
+  const todo=D.days.filter(x=>(x.status==='awaiting_manager'||x.status==='failed')&&canEditMember(x.member_id)).length;
+  return todo+Math.max(pendingOffersForMe().length,un);
 }
 
 function render(){
@@ -388,15 +422,19 @@ function render(){
   if(ui.view==='login')return app.innerHTML=vLogin();
   if(ui.view==='signup')return app.innerHTML=vSignup();
   if(ui.view==='nobiz')return app.innerHTML=`<div class="auth"><div class="hero">${LOGO.replace(/28/g,'72')}<h1>Turnario</h1><p>Il tuo account non è collegato a nessuna attività. Chiedi al tuo responsabile di aggiungerti.</p></div><div style="text-align:center"><button class="ghost" data-act="logout">Esci</button></div></div>`;
+  if(ui.view==='dev')return renderDev();
+  if(ui.view==='devboot')return app.innerHTML=vDevBoot();
   if(!D)return;
-  const M=isMgr();
-  const tabs=M?[['turni','Turni',I.cal],['mrich','Richieste',I.inbox],['staff','Personale',I.users],['regole','Regole',I.cog]]
-             :[['mese','Il mio mese',I.cal],['richiedi','Chiedi libero',I.plus],['richieste','Richieste',I.inbox],['reparto','Reparto',I.users]];
+  const M=isMgr(),S=myTeams().length>0;
+  const tabs=M?[['turni','Turni',I.cal],['richieste','Richieste',I.inbox],['staff','Personale',I.users],...(S?[['perso','Personalizza',I.spark]]:[]),['regole','Regole',I.cog]]
+            :S?[...(D.me.department_id?[['mese','Il mio mese',I.cal]]:[]),['turni','Team',I.users],['richieste','Richieste',I.inbox],['perso','Personalizza',I.spark],['regole','Regole',I.cog]]
+            :[['mese','Il mio mese',I.cal],['richiedi','Chiedi libero',I.plus],['richieste','Richieste',I.inbox],['reparto','Reparto',I.users],['prefs','Preferenze',I.heart]];
   if(!ui.tab||!tabs.some(t=>t[0]===ui.tab))ui.tab=tabs[0][0];
   const b=badge();
-  app.innerHTML=`<header class="top"><div class="brand">${LOGO}<span>Turnario</span><small>· ${h(D.business.name)}</small></div><div class="who"><button class="ghost sm" data-act="profile">${I.user.replace('<svg','<svg style="vertical-align:-4px;margin-right:4px"')}${h(D.me.name.split(' ')[0])}</button></div></header>
+  const imp=ui.asMember?`<div class="impbar"><span>Vedi come <b>${h(D.me.name)}</b> · ${h(D.me.job||(M?'Direzione':''))}</span><button class="ghost sm" data-act="impchoose">Cambia</button><button class="ghost sm" data-act="impexit">Esci</button></div>`:'';
+  app.innerHTML=`<header class="top"><div class="brand">${LOGO}<span>Turnario</span><small>· ${h(D.business.name)}</small></div><div class="who">${ui.dev&&!ui.asMember?`<button class="ghost sm" data-act="devhome">Sviluppatore</button>`:''}<button class="ghost sm" data-act="profile">${I.user.replace('<svg','<svg style="vertical-align:-4px;margin-right:4px"')}${h(D.me.name.split(' ')[0])}</button></div></header>${imp}
   <main>${V[ui.tab]()}</main>
-  <nav class="bottom">${tabs.map(t=>`<button class="${ui.tab===t[0]?'on':''}" data-act="tab" data-v="${t[0]}">${t[2]}<span>${t[1]}</span>${(t[0]==='richieste'||t[0]==='mrich')&&b?`<i class="badge">${b}</i>`:''}</button>`).join('')}</nav>`;
+  <nav class="bottom">${tabs.map(t=>`<button class="${ui.tab===t[0]?'on':''}" data-act="tab" data-v="${t[0]}">${t[2]}<span>${t[1]}</span>${t[0]==='richieste'&&b?`<i class="badge">${b}</i>`:''}</button>`).join('')}</nav>`;
 }
 
 /* ===== accesso ===== */
@@ -502,11 +540,22 @@ function notifList(){
 }
 function markReadSoon(){if(D.notifs.some(n=>!n.read))setTimeout(()=>api('mark_read').catch(()=>{}),1500)}
 V.richieste=()=>{
-  const po=pendingOffersForMe(),mine=D.requests.filter(r=>r.member_id===D.me.id);
+  const po=pendingOffersForMe(),mine=D.requests.filter(r=>r.member_id===D.me.id),inTeam=!!D.me.department_id;
+  const team=D.requests.filter(r=>r.member_id!==D.me.id&&canEditMember(r.member_id));
+  const todoIds=new Set(D.days.filter(x=>x.status==='awaiting_manager'||x.status==='failed').map(x=>x.request_id));
+  const todo=team.filter(r=>todoIds.has(r.id)),rest=team.filter(r=>!todoIds.has(r.id)),E=editableTeams().length>0;
   markReadSoon();
-  return`<h2>Richieste</h2><h3>Proposte per te</h3>${po.length?po.map(offerCard).join(''):'<div class="card empty">Nessuna proposta di cambio in attesa</div>'}
-  <h3 style="margin-top:20px">Le mie richieste · ${monthLabel(ui.month)}</h3>${mine.length?mine.map(r=>reqCard(r,false)).join(''):'<div class="card empty">Nessuna richiesta in questo mese</div>'}${notifList()}`;
+  return`<h2>Richieste</h2>
+  ${E?`<h3>Da gestire</h3>${todo.length?todo.map(r=>reqCard(r,true)).join(''):'<div class="card empty">Niente da gestire</div>'}`:''}
+  ${inTeam?`<h3 style="margin-top:20px">Proposte per te</h3>${po.length?po.map(offerCard).join(''):'<div class="card empty">Nessuna proposta di cambio in attesa</div>'}
+  <h3 style="margin-top:20px">Le mie richieste · ${monthLabel(ui.month)}</h3>${mine.length?mine.map(r=>reqCard(r,false)).join(''):'<div class="card empty">Nessuna richiesta in questo mese</div>'}
+  ${!E?'':`<div class="row" style="margin:6px 0 14px"><button class="ghost sm" data-act="tab" data-v="richiedi">Chiedi un giorno libero</button></div>`}`:''}
+  ${E?`<h3 style="margin-top:20px">Tutte le richieste del team</h3>${rest.length?rest.map(r=>reqCard(r,true)).join(''):'<div class="card empty">Nessuna richiesta</div>'}`:''}
+  ${isMgr()?`<div class="toggle"><input type="checkbox" id="f-appr" ${rules().managerApproval?'checked':''}><label for="f-appr">Gli scambi accettati richiedono l'approvazione del responsabile</label></div>`:''}
+  ${notifList()}
+  ${E&&D.log.length?`<div class="card"><h3>Registro modifiche</h3>${D.log.map(l=>`<div class="notif">${h(l.text)} <small>· ${ago(l.created_at)}</small></div>`).join('')}</div>`:''}`;
 };
+V.mrich=V.richieste;
 function grid(depId,{editable=false,meId=null}={}){
   const n=daysIn(),emps=employees(depId),days=[...Array(n).keys()],sh=shiftsOf(depId);
   if(!emps.length)return'<div class="card empty">Nessuna persona in questo reparto.</div>';
@@ -514,10 +563,18 @@ function grid(depId,{editable=false,meId=null}={}){
   const rows=emps.map(e=>{const seq=seqOf(e.id),vf=violFlagsCtx(e.id,depId),sf=softFlagsCtx(e.id);
     return`<tr class="${e.id===meId?'me':''}"><td class="sticky">${h(e.name)}</td>${seq.map((c,d)=>{const s=sdef(depId,c);
       return`<td class="c ${c==='R'?'R':''} ${editable?'edit':''} ${vf[d]?'viol':sf[d]?'exc':''} ${c==='R'&&isWe(d)?'we':''}" ${s?`style="--c:${s.color}"`:''} ${editable?`data-act="cell" data-v="${e.id}|${d}"`:''}><span>${c==='R'?'·':h(c)}</span></td>`}).join('')}<td><b>${seq.filter(x=>x!=='R').length}</b></td></tr>`}).join('');
-  const cov=sh.map(s=>`<tr class="cov"><td class="sticky">${h(s.code)} · copertura</td>${days.map(d=>{const k=emps.filter(e=>seqOf(e.id)[d]===s.code).length;return`<td class="${k<s.need?'short':''}">${k}/${s.need}</td>`}).join('')}<td></td></tr>`).join('');
+  const cov=covRows(depId,emps,days).map(r=>`<tr class="cov"><td class="sticky">${h(r.label)}</td>${r.cells.map(c=>c?`<td class="${c.k<c.need?'short':''}">${c.k}/${c.need}</td>`:'<td>–</td>').join('')}<td></td></tr>`).join('');
   return`<div class="gridwrap"><table class="grid"><thead>${head}</thead><tbody>${rows}${cov}</tbody></table></div>
   <div class="legend">${sh.map(s=>`<span class="chip"><i style="background:${s.color}"></i><b>${h(s.code)}</b> ${h(s.name)} ${s.start_time}–${s.end_time}</span>`).join('')}<span class="chip">· Riposo</span></div>`;
 }
+// fabbisogno del giorno per turno e mansione (stessa logica del server)
+function slotsForDay(depId,d){const out=[],wd=dow(d);for(const sh of shiftsOf(depId)){const rows=D.needs.filter(x=>x.shift_type_id===sh.id);
+  if(!rows.length){if(sh.need>0)out.push({code:sh.code,skill:null,need:sh.need});continue}
+  const by={};rows.forEach(r=>{const k=r.skill||'';if(r.weekday===null&&!(k in by))by[k]=r.need});rows.forEach(r=>{if(r.weekday===wd)by[r.skill||'']=r.need});
+  Object.entries(by).forEach(([k,need])=>{if(need>0)out.push({code:sh.code,skill:k||null,need})})}return out}
+function covRows(depId,emps,days){const keys=new Map();days.forEach(d=>slotsForDay(depId,d).forEach(sl=>keys.set(sl.code+'|'+(sl.skill||''),sl)));
+  return[...keys.values()].map(k=>({label:k.code+(k.skill?' · '+k.skill:' · copertura'),cells:days.map(d=>{const sl=slotsForDay(depId,d).find(x=>x.code===k.code&&(x.skill||'')===(k.skill||''));if(!sl)return null;
+    const kk=emps.filter(e=>{const a=D.assignments.find(x=>x.member_id===e.id&&x.day===dateOf(d));return a&&a.code===k.code&&(!k.skill||a.skill===k.skill||(!a.skill&&(e.skills||[]).includes(k.skill)))}).length;return{k:kk,need:sl.need}})}))}
 V.reparto=()=>{const me=D.me;if(!me.department_id)return'<div class="card empty">Nessun reparto</div>';
   if(notGenerated())return`<h2>Turni ${h(dept(me.department_id).name)}</h2><div class="card empty">Turni non ancora pubblicati.</div>`;
   return`<h2>Turni ${h(dept(me.department_id).name)}</h2><p class="muted">${monthLabel(ui.month)} · scorri a destra per vedere tutto il mese.</p>${grid(me.department_id,{meId:me.id})}`};
@@ -526,13 +583,14 @@ V.reparto=()=>{const me=D.me;if(!me.department_id)return'<div class="card empty"
 V.turni=()=>{
   if(!D.departments.length)return`<h2>Turni</h2><div class="card empty">Crea prima un reparto in Regole.</div>`;
   const cur=todayStr().slice(0,7);const list=[...new Set([...D.months,...[0,1,2,3,4,5].map(k=>monthAdd(cur,k))])].sort();
-  const seg=`<div class="seg">${D.departments.map(x=>`<button class="${x.id===ui.dept?'on':''}" data-act="dept" data-v="${x.id}">${h(x.name)}</button>`).join('')}</div>`;
-  if(notGenerated())return`<h2>Turni</h2><div class="toolbar">${monthPicker('f-month',list)}</div>
-    <div class="card"><h3>${monthLabel(ui.month)}: turni da generare</h3><p class="muted">Genero i turni di tutti i reparti rispettando coperture, riposi e ore minime tra un turno e l'altro. Potrai poi ritoccarli a mano.</p>
+  const teams=editableTeams();if(!teams.length)return`<h2>Turni</h2><div class="card empty">Non gestisci i turni di nessun team.</div>`;
+  const seg=teams.length>1?`<div class="seg">${teams.map(x=>`<button class="${x.id===ui.dept?'on':''}" data-act="dept" data-v="${x.id}">${h(x.name)}</button>`).join('')}</div>`:`<p class="muted" style="margin-top:-8px">${h(teams[0].name)}</p>`;
+  if(notGenerated())return`<h2>Turni</h2>${seg}<div class="toolbar">${monthPicker('f-month',list)}</div>
+    <div class="card"><h3>${monthLabel(ui.month)}: turni da generare</h3><p class="muted">Genero i turni ${isMgr()?'di tutti i team':'del tuo team'} rispettando coperture per mansione, riposi, preferenze e note. Potrai poi ritoccarli a mano.</p>
     <div class="toggle"><input type="checkbox" id="f-notify" checked><label for="f-notify">Avvisa il personale quando sono pronti</label></div>
     <button class="primary" data-act="generate">Genera i turni</button></div>`;
   const depId=ui.dept,emps=employees(depId);let unc=0,v=0;
-  for(let d=0;d<daysIn();d++)shiftsOf(depId).forEach(s=>{unc+=Math.max(0,s.need-emps.filter(e=>seqOf(e.id)[d]===s.code).length)});
+  covRows(depId,emps,[...Array(daysIn()).keys()]).forEach(r=>r.cells.forEach(c=>{if(c)unc+=Math.max(0,c.need-c.k)}));
   let x=0;emps.forEach(e=>{v+=violFlagsCtx(e.id,depId).filter(Boolean).length;x+=softFlagsCtx(e.id).filter(Boolean).length});
   return`<h2>Turni</h2>${seg}<div class="toolbar">${monthPicker('f-month',list)}<button class="ghost sm" data-act="regen">Rigenera</button></div>
   <p class="muted">Tocca una cella per cambiare il turno. Bordo rosso = regola violata. Bordo arancio = 6° giorno di fila, ammesso solo in casi eccezionali.</p>
@@ -572,7 +630,7 @@ const A={
   tab(v){ui.tab=v;render();scrollTo(0,0)},
   mclose:closeModal,
   mok(){const f=confirmBox._fn;closeModal();f&&f()},
-  async logout(){closeModal();if(channel){sb.removeChannel(channel);channel=null}await sb.auth.signOut();D=null;ui.month=null;ui.tab=null;ui.view='login';render()},
+  async logout(){closeModal();if(channel){sb.removeChannel(channel);channel=null}await sb.auth.signOut();D=null;ui.month=null;ui.tab=null;ui.dev=undefined;ui.asMember=null;ui.devHome=false;ui.view='login';render()},
   profile(){modal(`<h3>${h(D.me.name)}</h3><p class="muted">${h(D.me.email)} · ${isMgr()?'Responsabile':h((dept(D.me.department_id)||{}).name||'')}</p>
     ${isMgr()?'':`<div class="info" style="margin:4px 0 14px"><b>I turni nel calendario del telefono</b><br>Si aggiornano da soli, anche dopo gli scambi. Funziona con iPhone e Android.<div class="row" style="margin-top:10px"><button class="primary sm" data-act="calendar">Collega il calendario</button></div></div>`}
     <label class="f">Nuova password<input type="password" id="p-new" minlength="8" autocomplete="new-password" placeholder="Almeno 8 caratteri"></label>`,
@@ -599,8 +657,8 @@ const A={
   cell(v){const[id,d]=v.split('|');const m=mem(id);const codes=['R',...shiftsOf(m.department_id).map(s=>s.code)];const cur=seqOf(id)[+d];const next=codes[(codes.indexOf(cur)+1)%codes.length];
     const a=D.assignments.filter(x=>!(x.member_id===id&&x.day===dateOf(+d)));if(next!=='R')a.push({member_id:id,day:dateOf(+d),code:next});D.assignments=a;render();
     api('set_cell',{member_id:id,day:dateOf(+d),code:next}).catch(e=>{toast(e.message);scheduleReload()})},
-  generate(){const notify=(document.getElementById('f-notify')||{}).checked;run(()=>api('generate',{month:ui.month,notify}),'Turni generati')},
-  regen(){confirmBox(`Rigenerare tutti i turni di ${monthLabel(ui.month)}? Le modifiche manuali e le richieste del mese verranno azzerate.`,'Rigenera',()=>run(()=>api('generate',{month:ui.month}),'Turni rigenerati'),true)},
+  generate(){const notify=(document.getElementById('f-notify')||{}).checked;run(()=>api('generate',{month:ui.month,notify,...(isMgr()?{}:{department_id:ui.dept})}),'Turni generati')},
+  regen(){const dp=dept(ui.dept);confirmBox(`Rigenerare i turni di ${h(dp.name)} per ${monthLabel(ui.month)}? Le modifiche manuali e le richieste del mese di questo team verranno azzerate.`,'Rigenera',()=>run(()=>api('generate',{month:ui.month,department_id:ui.dept}),'Turni rigenerati'),true)},
   approve(v){run(()=>api('approve_day',{request_day_id:v}))},
   reject(v){run(()=>api('reject_day',{request_day_id:v}),'Richiesta rifiutata')},
   retry(v){run(()=>api('retry_day',{request_day_id:v}))},
@@ -635,7 +693,7 @@ document.addEventListener('change',async ev=>{
   if(ev.target.id==='f-appr'){const r={...rules(),managerApproval:ev.target.checked};run(()=>api('save_settings',{rules:r,shifts:[]}),ev.target.checked?'Gli scambi ora passano da te':'Gli scambi si applicano subito')}
 });
 document.addEventListener('submit',async ev=>{
-  ev.preventDefault();const f=new FormData(ev.target);ui.err='';
+  ev.preventDefault();if(ev.target.id==='f-devboot')return;const f=new FormData(ev.target);ui.err='';
   try{
     if(ev.target.id==='f-signup'){
       await api('signup_business',{business_name:f.get('business_name'),kind:f.get('kind'),name:f.get('name'),email:f.get('email'),password:f.get('password')});
@@ -652,9 +710,284 @@ sb.auth.onAuthStateChange((evt,s)=>{
   if(s&&(evt==='SIGNED_IN'||evt==='INITIAL_SESSION')&&was!==s.user.id){
     setTimeout(async()=>{try{await loadAll();subscribe()}catch(e){toast(e.message)}render()},0);
   }
-  if(!s){session=null;D=null;if(ui.view==='app'||ui.view==='nobiz')ui.view='login';render()}
+  if(!s){session=null;D=null;ui.dev=undefined;ui.asMember=null;ui.devHome=false;if(['app','nobiz','dev'].includes(ui.view))ui.view=location.hash==='#sviluppatore'?'devboot':'login';render()}
 });
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&D)scheduleReload()});
+</script>
+<script>
+"use strict";
+/* ================= Sviluppatore ================= */
+async function loadDev(){
+  D=null;
+  const [hotels,members]=await Promise.all([sel(sb.from('businesses').select('*').order('created_at')),sel(sb.from('members').select('id,business_id,active'))]);
+  ui.hotels=hotels.map(b=>({...b,count:members.filter(m=>m.business_id===b.id&&m.active).length}));
+}
+function vDevBoot(){
+  return`<div class="auth"><div class="hero">${LOGO.replace(/28/g,'72')}<h1>Sviluppatore</h1><p>Crea l'account sviluppatore. Si può fare una volta sola.</p></div>
+  <form class="card" id="f-devboot">${ui.err?`<div class="err">${h(ui.err)}</div>`:''}
+  <label class="f">Il tuo nome<input name="name" required></label><label class="f">Email<input type="email" name="email" autocomplete="username" required></label>
+  <label class="f">Password (almeno 10 caratteri)<input type="password" name="password" minlength="10" autocomplete="new-password" required></label>
+  <button class="primary" style="width:100%">Crea e accedi</button></form>
+  <div style="text-align:center"><button class="link" data-act="go" data-v="login">Ho già un account</button></div></div>`;
+}
+function renderDev(){
+  const app=document.getElementById('app'),H=ui.hotels||[];
+  app.innerHTML=`<header class="top"><div class="brand">${LOGO}<span>Turnario</span><small>· Sviluppatore</small></div><div class="who"><button class="ghost sm" data-act="logout">Esci</button></div></header>
+  <main><h2>Hotel</h2>
+  <div class="row" style="margin-bottom:10px"><input id="map-q" class="grow" style="width:auto" placeholder="Cerca un luogo o un hotel (es. Rimini)"><button class="ghost" data-act="mapsearch">Cerca</button></div>
+  <div id="map"></div>
+  <div class="row" style="margin-bottom:16px"><button class="primary sm" data-act="maphotels">${I.pin.replace('<svg','<svg width="18" height="18"')}Trova hotel in quest'area</button><button class="ghost sm" data-act="mapadd">Aggiungi al centro della mappa</button></div>
+  <div class="card"><h3>I tuoi hotel</h3>${H.length?H.map(b=>`<div class="hotel"><div class="grow"><b>${h(b.name)}</b><br><small>${h(b.address||'Senza indirizzo')} · ${b.count} persone</small></div>
+    <button class="primary sm" data-act="enterhotel" data-v="${b.id}">Entra</button>${b.lat==null?`<button class="ghost sm" data-act="locate" data-v="${b.id}">Posiziona</button>`:''}<button class="ghost sm danger" data-act="delhotel" data-v="${b.id}">Elimina</button></div>`).join(''):'<div class="empty">Nessun hotel. Cercalo sulla mappa e aggiungilo.</div>'}</div>
+  <div class="card"><h3>Privacy</h3><div class="toggle"><input type="checkbox" id="f-devnotes" ${ui.devNotes?'checked':''}><label for="f-devnotes">Lo sviluppatore può leggere le note riservate (entrando con "Vedi come" nel responsabile del team)</label></div>
+  <p class="muted">Quando lo spegni, le note restano visibili solo ai responsabili di ogni team. Ogni lettura viene registrata.</p></div></main>`;
+  setTimeout(initMap,0);
+}
+let map=null,foundLayer=null;
+function initMap(){
+  const el=document.getElementById('map');if(!el||!window.L)return;
+  map=L.map(el,{zoomControl:true}).setView(ui.mapView?.c||[42.5,12.5],ui.mapView?.z||6);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+  (ui.hotels||[]).filter(b=>b.lat!=null).forEach(b=>L.marker([b.lat,b.lng]).addTo(map).bindPopup(`<b>${h(b.name)}</b><br>${b.count} persone<br><a href="#" data-act="enterhotel" data-v="${b.id}">Entra</a>`));
+  foundLayer=L.layerGroup().addTo(map);
+  map.on('moveend',()=>{ui.mapView={c:map.getCenter(),z:map.getZoom()}});
+  map.on('click',e=>{if(ui.locating){const id=ui.locating;ui.locating=null;run2(()=>api('dev_update_hotel',{business_id:id,lat:e.latlng.lat,lng:e.latlng.lng}),'Posizione salvata')}});
+}
+async function run2(fn,msg){try{const r=await fn();if(msg)toast(msg);await loadAll();render();return r}catch(e){toast(e.message)}}
+function addHotelSheet(name,lat,lng,address){
+  modal(`<h3>Aggiungi hotel</h3><label class="f">Nome<input id="nh-name" value="${h(name||'')}"></label><label class="f">Indirizzo<input id="nh-addr" value="${h(address||'')}"></label>
+  <div class="toggle"><input type="checkbox" id="nh-demo" checked><label for="nh-demo">Crea organigramma e personale di prova (nomi finti)</label></div>
+  <p class="muted">Team: Direzione, Front Office e Ristorante, con responsabili, mansioni e fabbisogni già impostati. Puoi modificare tutto dopo.</p>`,
+  `<button class="ghost" data-act="mclose">Annulla</button><button class="primary" data-act="addhotelok" data-v="${lat},${lng}">Aggiungi</button>`);
+}
+function chooseAs(bizId){
+  sel(sb.from('members').select('*').eq('business_id',bizId).eq('active',true).order('name')).then(async ms=>{
+    const deps=await sel(sb.from('departments').select('*').eq('business_id',bizId).order('position'));
+    const tag=m=>[m.role==='manager'?'Direzione':'',...deps.filter(d=>d.scheduler_id===m.id).map(d=>'fa i turni di '+d.name),...deps.filter(d=>d.deputy_id===m.id).map(d=>'sostituto '+d.name)].filter(Boolean).join(' · ');
+    const grp=[{name:'Senza team',list:ms.filter(m=>!m.department_id)},...deps.map(d=>({name:d.name,list:ms.filter(m=>m.department_id===d.id)}))].filter(g=>g.list.length);
+    modal(`<h3>Vedi come…</h3><p class="muted">Usi l'app esattamente come la vede quella persona.</p>${grp.map(g=>`<h3 style="margin:14px 0 6px;text-transform:uppercase;font-size:12px;color:var(--muted)">${h(g.name)}</h3>${g.list.map(m=>`<button class="user" data-act="impset" data-v="${m.id}"><span class="av" style="background:${avColor(m.id)}">${h(initials(m.name))}</span><span><b>${h(m.name)}</b><small>${h(m.job||'')}${tag(m)?' · '+h(tag(m)):''}</small></span></button>`).join('')}`).join('')||'<div class="empty">Nessuna persona</div>'}`,
+    `<button class="ghost" data-act="mclose">Chiudi</button>`);
+  }).catch(e=>toast(e.message));
+}
+async function mapSearch(){const q=document.getElementById('map-q').value.trim();if(!q)return;
+  try{const r=await (await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=it&q='+encodeURIComponent(q))).json();
+    if(!r.length)return toast('Luogo non trovato');map.setView([+r[0].lat,+r[0].lon],14)}catch(e){toast('Ricerca non disponibile ora')}}
+async function mapHotels(){
+  if(map.getZoom()<12)return toast('Avvicinati di più alla zona per cercare gli hotel');
+  const b=map.getBounds(),qy=`[out:json][timeout:20];nwr["tourism"~"hotel|guest_house|hostel|motel"](${b.getSouth()},${b.getWest()},${b.getNorth()},${b.getEast()});out center 80;`;
+  try{busy(true);const r=await (await fetch('https://overpass-api.de/api/interpreter',{method:'POST',body:'data='+encodeURIComponent(qy)})).json();
+    foundLayer.clearLayers();let n=0;
+    (r.elements||[]).forEach(e=>{const la=e.lat??e.center?.lat,lo=e.lon??e.center?.lon,nm=e.tags?.name;if(la==null||!nm)return;n++;
+      const addr=[e.tags['addr:street'],e.tags['addr:housenumber'],e.tags['addr:city']].filter(Boolean).join(' ');
+      L.circleMarker([la,lo],{radius:8,color:'#007AFF',fillOpacity:.6}).addTo(foundLayer).bindPopup(`<b>${h(nm)}</b><br><small>${h(addr)}</small><br><a href="#" data-act="addfound" data-v="${encodeURIComponent(JSON.stringify({nm,la,lo,addr}))}">Aggiungi a Turnario</a>`)});
+    toast(n?`${n} hotel trovati: tocca un punto blu`:'Nessun hotel in quest\'area')}catch(e){toast('Ricerca hotel non disponibile ora')}finally{busy(false)}
+}
+
+/* ================= Assistente: dalle frasi alle regole (versione base, senza IA) ================= */
+const WD=['domenica','lunedi','martedi','mercoledi','giovedi','venerdi','sabato'];
+const norm=t=>t.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[’']/g,"'");
+const NUMW={un:1,una:1,uno:1,due:2,tre:3,quattro:4,cinque:5,sei:6,sette:7,otto:8,nove:9,dieci:10};
+function shiftLex(depId){
+  const sh=shiftsOf(depId),lex=[];
+  for(const s of sh){const st=toMin(s.start_time),night=toMin(s.end_time)<=st,words=new Set(norm(s.name).split(/[^a-z]+/).filter(w=>w.length>2&&!['del','dei','con','per'].includes(w)));
+    if(night||st>=20*60)['notte','notti','notturno','notturni','notturna','notturne'].forEach(w=>words.add(w));
+    else if(st<11*60)['mattina','mattine','mattino','mattutino','mattutini'].forEach(w=>words.add(w));
+    else if(st<17*60)['pomeriggio','pomeriggi','pomeridiano','pomeridiani'].forEach(w=>words.add(w));
+    else ['sera','sere','serale','serali'].forEach(w=>words.add(w));
+    [...words].forEach(w=>{if(w.endsWith('a'))words.add(w.slice(0,-1)+'e');if(w.endsWith('o'))words.add(w.slice(0,-1)+'i');if(w.endsWith('e'))words.add(w.slice(0,-1)+'i')});
+    lex.push({code:s.code,name:s.name,night,words:[...words]})}
+  return lex;
+}
+function findShifts(t,lex){const out=[];lex.forEach(x=>{for(const w of x.words){const m=new RegExp('\\b'+w+'\\b').exec(t);if(m){out.push({code:x.code,pos:m.index,night:x.night});break}}});return out.sort((a,b)=>a.pos-b.pos)}
+function weightOf(t){if(/(il piu possibile|assolutamente|sempre|molto|necessit|tassativ|categoric)/.test(t))return 3;if(/(se possibile|un po|leggermente|ogni tanto|quando si puo)/.test(t))return 1;return 2}
+const PRI=['','bassa','media','alta'];
+function ruleLabel(r,depId){const nm=c=>(sdef(depId,c)||{}).name||c;
+  return r.kind==='avoid_shift'?`Evitare: ${nm(r.shift_code)}`:r.kind==='prefer_shift'?`Preferire: ${nm(r.shift_code)}`:r.kind==='only_shifts'?`Solo: ${r.shift_codes.map(nm).join(', ')}`
+    :r.kind==='max_per_month'?(r.value===0?`Mai: ${nm(r.shift_code)}`:`Max ${r.value} ${nm(r.shift_code)} al mese`):r.kind==='unavailable_weekday'?`Mai di ${WD[r.weekday].replace('i$','ì')}`:`Evitare il ${WD[r.weekday]}`}
+function parseSentence(t,depId){
+  const lex=shiftLex(depId),rules=[],w=weightOf(t);let sh=findShifts(t,lex);
+  const nightCodes=lex.filter(x=>x.night).map(x=>x.code),dayCodes=lex.filter(x=>!x.night).map(x=>x.code);
+  // "qualche/2 pomeriggi al mese"
+  const re=/(giusto |solo )?(qualche|un paio di|al massimo|massimo|max|\d+|un|una|due|tre|quattro|cinque|sei|sette|otto)\s+(\w+)\s+(al|a|nel|ogni)\s+mese/g;let m;const counted=new Set();
+  while((m=re.exec(t))){const x=findShifts(m[3],lex)[0];if(!x)continue;let v=m[2]==='qualche'?(m[1]?2:3):m[2]==='un paio di'?2:/^\d+$/.test(m[2])?+m[2]:NUMW[m[2]]??3;
+    if(['al massimo','massimo','max'].includes(m[2])){const n2=/(\d+)/.exec(t.slice(m.index));v=n2?+n2[1]:3}
+    rules.push({kind:'max_per_month',shift_code:x.code,value:v,weight:3});counted.add(x.code)}
+  // giorni della settimana
+  WD.forEach((d,i)=>{const r=new RegExp('\\b(il |la |i |le |di |nei |ai )?'+d.slice(0,5)+'\\w*').exec(t);if(!r)return;
+    if(/(non (puo|riesce|e disponibile|c'e)|mai|impossibil|indisponibil)/.test(t))rules.push({kind:'unavailable_weekday',weekday:i,weight:3});
+    else if(/(evit|meglio non|preferi\w* non|non (vuole|ama|gli piace|le piace))/.test(t))rules.push({kind:'avoid_weekday',weekday:i,weight:w})});
+  if(/\bweekend\b|fine settimana/.test(t)&&/(non (puo|riesce)|mai)/.test(t))[6,0].forEach(i=>rules.push({kind:'unavailable_weekday',weekday:i,weight:3}));
+  const rest=sh.filter(x=>!counted.has(x.code)).map(x=>x.code);
+  const dayWord=/di giorno|turni diurni|diurn/.test(t);
+  if(/\bsolo\b|soltanto|esclusivamente/.test(t)&&rest.length)rules.push({kind:'only_shifts',shift_codes:[...new Set(rest)],weight:3});
+  else if(/\bmai\b|non (puo|deve|riesce a) (fare|lavorare)|esclud/.test(t)&&rest.length)rest.forEach(c=>rules.push({kind:'max_per_month',shift_code:c,value:0,weight:3}));
+  else if(/(mi piace metter|lavora (molto |davvero )?bene|rende (molto )?bene|e (molto )?brav|preferisco metter|metterl[oa] (anche|spesso|volentieri)|da preferire|va benissimo|e perfett)/.test(t)&&(rest.length||/di notte/.test(t)))
+    (rest.length?rest:nightCodes).forEach(c=>rules.push({kind:'prefer_shift',shift_code:c,weight:w}));
+  else if(/(evit|meno possibile|non (lo |la )?metter|non (lo |la )?metto|sbagli|errori|distratt|stanc|non (gli|le) (piac|va)|odia|pesant)/.test(t)||(dayWord&&/prefer/.test(t))){
+    if(dayWord&&!rest.length)nightCodes.forEach(c=>rules.push({kind:'avoid_shift',shift_code:c,weight:w}));
+    else rest.forEach(c=>rules.push({kind:'avoid_shift',shift_code:c,weight:w}));}
+  else if(/(prefer|piace|vorrebbe|chiede|desidera|ama|volentieri)/.test(t)&&rest.length)rest.forEach(c=>rules.push({kind:'prefer_shift',shift_code:c,weight:Math.min(w,2)}));
+  else if(dayWord&&/prefer|meglio/.test(t))nightCodes.forEach(c=>rules.push({kind:'avoid_shift',shift_code:c,weight:w}));
+  // niente doppioni
+  const seen=new Set();return rules.filter(r=>{const k=JSON.stringify([r.kind,r.shift_code,r.weekday,r.shift_codes]);if(seen.has(k))return false;seen.add(k);return true}).map(r=>({...r,label:ruleLabel(r,depId)}));
+}
+// divide il testo per persona: ogni frase va alla persona nominata (o all'ultima nominata)
+function parseNotes(text,people,forced){
+  const out=new Map();let cur=forced||null;
+  const sents=text.split(/(?<=[.!?;\n])\s+|\n+/).map(x=>x.trim()).filter(Boolean);
+  for(const raw of sents){const t=norm(raw);
+    if(!forced){let best=null,bp=1e9;people.forEach(p=>{const parts=norm(p.name).split(' ');for(const k of [norm(p.name),parts[0],parts[parts.length-1]]){const m=new RegExp('\\b'+k+'\\b').exec(t);if(m&&m.index<bp){bp=m.index;best=p}}});if(best)cur=best}
+    if(!cur)continue;
+    const e=out.get(cur.id)||{person:cur,text:[],rules:[]};e.text.push(raw);e.rules.push(...parseSentence(t,cur.department_id));out.set(cur.id,e)}
+  return[...out.values()].map(e=>({...e,text:e.text.join(' ')}));
+}
+function ruleChip(r,depId,del){return`<span class="rule ${r.source==='pref'?'pref':''} ${['only_shifts','max_per_month','unavailable_weekday'].includes(r.kind)?'hard':''}">${h(r.label||ruleLabel(r,depId))}${r.weight&&!['only_shifts','max_per_month','unavailable_weekday'].includes(r.kind)?` · ${PRI[r.weight]}`:''}${r.source==='pref'?' · dal dipendente':''}${del?`<button data-act="${del.act}" data-v="${del.v}" aria-label="Elimina">✕</button>`:''}</span>`}
+
+/* ================= Personalizzazione (responsabile) ================= */
+ui.perso={dept:null,data:null,draft:null,loading:false,err:''};
+async function loadPerso(){const P=ui.perso;P.loading=true;P.err='';try{P.data=await api('team_personal',{department_id:P.dept})}catch(e){P.data=null;P.err=e.message}P.loading=false;render()}
+V.perso=()=>{
+  const teams=myTeams(),P=ui.perso;
+  if(!teams.length)return`<h2>Personalizza</h2><div class="card empty">La personalizzazione è riservata a chi fa i turni di un team.</div>`;
+  if(!P.dept||!teams.some(t=>t.id===P.dept)){P.dept=teams[0].id;P.data=null;P.draft=null}
+  if(!P.data&&!P.loading&&!P.err)setTimeout(loadPerso,0);
+  const dp=dept(P.dept),team=employees(P.dept).filter(m=>m.id!==D.me.id);
+  const seg=teams.length>1?`<div class="seg">${teams.map(x=>`<button class="${x.id===P.dept?'on':''}" data-act="persodept" data-v="${x.id}">${h(x.name)}</button>`).join('')}</div>`:'';
+  const draft=P.draft?`<div class="card"><h3>Ho capito così</h3>${P.draft.length?P.draft.map((e,i)=>`<div class="pcard"><div class="ohead">${av(e.person.id)}<div><b>${h(e.person.name)}</b><small>${h(e.text)}</small></div></div>
+    ${e.rules.length?e.rules.map((r,j)=>ruleChip(r,P.dept,{act:'draftdel',v:i+'|'+j})).join(''):'<p class="muted">Non ho riconosciuto regole: salvo solo la nota. Puoi aggiungere una regola a mano dalla scheda della persona.</p>'}</div>`).join('')
+    :'<p class="muted">Non ho trovato nomi di colleghi del team nel testo.</p>'}
+    <div class="row" style="margin-top:8px"><button class="ghost grow" data-act="draftcancel">Annulla</button>${P.draft.length?'<button class="primary grow" data-act="draftsave">Conferma e salva</button>':''}</div></div>`:'';
+  let body='';
+  if(P.loading&&!P.data)body='<div class="card empty">Carico…</div>';
+  else if(P.err)body=`<div class="card empty">${h(P.err)}</div>`;
+  else if(P.data){const{notes,rules,prefs}=P.data;
+    body=`<div class="card"><h3>Il team</h3>${team.map(m=>{const rs=rules.filter(r=>r.member_id===m.id),ns=notes.filter(n=>n.member_id===m.id),ps=prefs.filter(x=>x.member_id===m.id);
+      return`<div class="pcard"><div class="ohead">${av(m.id)}<div class="grow"><b>${h(m.name)}</b><small>${h(m.job||'')}${(m.skills||[]).map(x=>`<span class="skill">${h(x)}</span>`).join('')}</small></div><button class="ghost sm" data-act="ruleadd" data-v="${m.id}">+ Regola</button></div>
+      ${rs.length?rs.map(r=>ruleChip(r,P.dept,{act:'ruledel',v:r.id})).join(''):'<p class="muted" style="margin:0 0 6px">Nessuna regola</p>'}
+      ${ps.map(x=>`<div class="quote">“${h(x.text)}” <small>· preferenza di ${h(first(m.id))}, ${ago(x.created_at)}</small></div>`).join('')}
+      ${ns.map(n=>`<div class="quote" style="border-color:var(--accent)">${h(n.text)} <small>· tua nota, ${ago(n.created_at)}</small> <button class="link danger" style="padding:0 4px;min-height:0;font-size:13px" data-act="notedel" data-v="${n.id}">elimina</button></div>`).join('')}</div>`}).join('')||'<div class="empty">Nessuno nel team</div>'}</div>`}
+  return`<h2>Personalizza</h2>${seg}<span class="lock">Riservato: lo vedi solo tu ${dp.deputy_id&&dp.deputy_id!==D.me.id?'e il tuo sostituto':dp.scheduler_id!==D.me.id?'e il responsabile del team':''}</span>
+  <div class="card"><h3>Assistente</h3><p class="muted">Scrivi come parleresti a un collega: trasformo le frasi in regole per i turni. Prima di salvare ti mostro cosa ho capito.</p>
+  <textarea id="perso-text" placeholder="Es. Marco chiede le notti ma sbaglia spesso: evitiamolo il più possibile. Giovanni lavora molto bene di notte. Martina fa solo mattine e giusto qualche pomeriggio al mese.">${h(P.text||'')}</textarea>
+  <div class="row" style="margin-top:10px"><button class="primary" data-act="persoparse">Interpreta</button><small>Versione base senza IA: capisce frasi semplici.</small></div></div>
+  ${draft}${body}`;
+};
+
+/* ================= Preferenze (dipendente) ================= */
+ui.prefs={data:null,draft:null,loading:false};
+async function loadPrefs(){ui.prefs.loading=true;try{ui.prefs.data=await api('my_prefs')}catch(e){toast(e.message)}ui.prefs.loading=false;render()}
+V.prefs=()=>{
+  const P=ui.prefs,me=D.me;
+  if(!me.department_id)return`<h2>Preferenze</h2><div class="card empty">Non sei in un team.</div>`;
+  if(!P.data&&!P.loading)setTimeout(loadPrefs,0);
+  const boss=(()=>{const d=dept(me.department_id);return d&&d.scheduler_id?name(d.scheduler_id):'il tuo responsabile'})();
+  return`<h2>Preferenze</h2><span class="lock">Le vedete solo tu e ${h(boss)}</span>
+  <div class="card"><h3>Dimmi come preferisci lavorare</h3><p class="muted">Ne terremo conto quando si fanno i turni del mese, insieme alle esigenze del reparto.</p>
+  <textarea id="pref-text" placeholder="Es. Preferisco le mattine. Il sabato non posso. Le notti se possibile meno.">${h(P.text||'')}</textarea>
+  <div class="row" style="margin-top:10px"><button class="primary" data-act="prefparse">Continua</button></div>
+  ${P.draft?`<div style="margin-top:14px"><b>Ho capito così:</b><div style="margin-top:8px">${P.draft.rules.length?P.draft.rules.map((r,j)=>ruleChip({...r,source:'pref'},me.department_id,{act:'prefdraftdel',v:j})).join(''):'<p class="muted">Nessuna regola riconosciuta: salvo il testo, lo leggerà il tuo responsabile.</p>'}</div>
+    <div class="row" style="margin-top:8px"><button class="ghost grow" data-act="prefcancel">Annulla</button><button class="primary grow" data-act="prefsave">Salva</button></div></div>`:''}</div>
+  ${P.data?`<div class="card"><h3>Le tue regole</h3>${P.data.rules.length?P.data.rules.map(r=>ruleChip(r,me.department_id,{act:'myruledel',v:r.id})).join(''):'<p class="muted">Ancora nessuna</p>'}
+  ${P.data.prefs.map(x=>`<div class="quote">“${h(x.text)}” <small>· ${ago(x.created_at)}</small> <button class="link danger" style="padding:0 4px;min-height:0;font-size:13px" data-act="mypredel" data-v="${x.id}">elimina</button></div>`).join('')}</div>`:'<div class="card empty">Carico…</div>'}`;
+};
+
+/* ================= Personale (organigramma) ================= */
+const allSkills=()=>[...new Set(['cameriere','chef','manager','barman','receptionist',...D.members.flatMap(m=>m.skills||[])])];
+V.staff=()=>{
+  const opt=(sel,ids)=>`<option value="">—</option>`+D.members.filter(m=>m.active).map(m=>`<option value="${m.id}" ${m.id===sel?'selected':''}>${h(m.name)}</option>`).join('');
+  const row=e=>`<div class="staff">${av(e.id)}<div class="grow"><b>${h(e.name)}</b><br><small>${h(e.job||'')}${(e.skills||[]).map(x=>`<span class="skill">${h(x)}</span>`).join('')}${e.role==='manager'?'<span class="skill">direzione</span>':''}</small></div>
+    <button class="ghost sm" data-act="editemp" data-v="${e.id}">Modifica</button></div>`;
+  const noTeam=D.members.filter(m=>m.active&&!m.department_id);
+  return`<h2>Personale</h2>${D.departments.map(dp=>`<div class="card"><h3>${h(dp.name)}</h3>
+    <div class="two"><label class="f">Fa i turni<select data-team="${dp.id}|scheduler_id">${opt(dp.scheduler_id)}</select></label><label class="f">Sostituto<select data-team="${dp.id}|deputy_id">${opt(dp.deputy_id)}</select></label></div>
+    ${employees(dp.id).map(row).join('')||'<div class="empty">Nessuno</div>'}</div>`).join('')}
+  ${noTeam.length?`<div class="card"><h3>Senza team</h3>${noTeam.map(row).join('')}</div>`:''}
+  <div class="card"><h3>Aggiungi una persona</h3><p class="muted">${ui.dev?'Lascia vuota l\'email per creare una persona di prova senza account.':'Creo il suo account con una password temporanea da girargli.'}</p>
+  <label class="f">Nome e cognome<input id="n-name" placeholder="Es. Anna Verdi"></label><label class="f">Email<input id="n-email" type="email" placeholder="anna@esempio.it"></label>
+  <div class="two"><label class="f">Team<select id="n-dept">${D.departments.map(d=>`<option value="${d.id}">${h(d.name)}</option>`).join('')}<option value="__mgr">— Direzione (senza team) —</option></select></label><label class="f">Ruolo<input id="n-job" placeholder="Es. Receptionist"></label></div>
+  <label class="f">Mansioni (separate da virgola)<input id="n-skills" list="skills-list" placeholder="Es. cameriere"></label><datalist id="skills-list">${allSkills().map(x=>`<option value="${h(x)}">`).join('')}</datalist>
+  <button class="primary" data-act="addemp">Aggiungi</button></div>`;
+};
+
+/* ================= Regole + fabbisogno per mansione ================= */
+const WDS=['dom','lun','mar','mer','gio','ven','sab'];
+function needEditor(s){const rows=D.needs.filter(x=>x.shift_type_id===s.id);
+  return`<div style="margin:6px 0 14px"><small style="font-weight:600">Fabbisogno per mansione ${rows.length?'':'(ora: '+s.need+' persone qualsiasi)'}</small>
+  <div id="needs-${s.id}" style="margin-top:6px">${rows.map(r=>needRow(r)).join('')}</div>
+  <div class="row"><button class="link" style="padding-left:0" data-act="needadd" data-v="${s.id}">+ Aggiungi riga</button><button class="ghost sm" data-act="needsave" data-v="${s.id}">Salva fabbisogno</button></div></div>`}
+function needRow(r={}){return`<div class="needrow"><input list="skills-list" placeholder="mansione (vuoto = chiunque)" value="${h(r.skill||'')}" data-n="skill"><select data-n="weekday"><option value="">ogni giorno</option>${WDS.map((d,i)=>`<option value="${i}" ${r.weekday===i?'selected':''}>${d}</option>`).join('')}</select><input type="number" min="0" max="50" value="${r.need??1}" data-n="need"><button class="ghost sm danger" data-act="needdel">✕</button></div>`}
+V.regole=()=>{const M=isMgr(),teams=editableTeams();
+  return`<h2>Regole dei turni</h2><datalist id="skills-list">${allSkills().map(x=>`<option value="${h(x)}">`).join('')}</datalist>
+  ${teams.map(dp=>`<div class="card"><h3>${h(dp.name)}</h3>${shiftsOf(dp.id).map(s=>`<div class="shiftrow"><label><span class="code" style="background:${s.color}">${h(s.code)}</span>Nome<input data-sh="${s.id}|name" value="${h(s.name)}" ${M?'':'disabled'}></label><label>Inizio<input type="time" data-sh="${s.id}|start_time" value="${s.start_time}" ${M?'':'disabled'}></label><label>Fine<input type="time" data-sh="${s.id}|end_time" value="${s.end_time}" ${M?'':'disabled'}></label><label>Persone<input type="number" min="0" max="50" data-sh="${s.id}|need" value="${s.need}" ${M?'':'disabled'}></label><button class="ghost sm danger" data-act="delshift" data-v="${s.id}" title="Elimina">✕</button></div>${needEditor(s)}`).join('')||'<p class="muted">Nessun turno</p>'}
+  <button class="link" style="padding-left:0" data-act="addshift" data-v="${dp.id}">+ Aggiungi un turno</button></div>`).join('')}
+  ${M?`<div class="card"><h3>Vincoli</h3><div class="two"><label class="f">Riposo minimo tra due turni (ore)<input type="number" id="r-rest" min="0" max="24" value="${rules().minRest}"></label><label class="f">Massimo giorni di fila (normale)<input type="number" id="r-consec" min="1" max="14" value="${rules().maxConsec}"></label><label class="f">Massimo in casi eccezionali<input type="number" id="r-consecx" min="1" max="14" value="${exCap()}"></label>
+  <label class="f">Riposi a settimana<input type="number" id="r-rpw" min="0" max="4" value="${rules().restPerWeek}"></label><label class="f">Giorni liberi dopo le notti<input type="number" id="r-night" min="0" max="4" value="${restN()}"></label><label class="f">Colleghi da contattare per richiesta<input type="number" id="r-send" min="1" max="10" value="${rules().sendTo}"></label></div>
+  <button class="primary" data-act="saverules">Salva le regole</button><p class="muted">Le nuove regole valgono per i prossimi turni generati e per i prossimi scambi.</p></div>
+  <div class="card"><h3>Nuovo team</h3><div class="row"><input id="n-dep" class="grow" style="width:auto" placeholder="Es. Housekeeping"><button class="ghost" data-act="adddept">Aggiungi</button></div></div>`:''}`};
+
+/* ================= Azioni nuove ================= */
+Object.assign(A,{
+  devhome(){ui.devHome=true;ui.asMember=null;ui.month=null;loadAll().then(render).catch(e=>toast(e.message))},
+  impexit(){A.devhome()},
+  impchoose(){chooseAs(D.business.id)},
+  enterhotel(v){chooseAs(v)},
+  async impset(v){closeModal();ui.asMember=v;ui.devHome=false;ui.month=null;ui.tab=null;ui.perso.data=null;ui.perso.dept=null;ui.prefs.data=null;try{await loadAll();subscribe()}catch(e){toast(e.message)}render();scrollTo(0,0)},
+  mapsearch:mapSearch, maphotels:mapHotels,
+  mapadd(){const c=map.getCenter();addHotelSheet('',c.lat,c.lng,'')},
+  addfound(v){const x=JSON.parse(decodeURIComponent(v));addHotelSheet(x.nm,x.la,x.lo,x.addr)},
+  addhotelok(v){const[la,lo]=v.split(',').map(Number);const p={name:document.getElementById('nh-name').value,address:document.getElementById('nh-addr').value,lat:la,lng:lo,demo:document.getElementById('nh-demo').checked};closeModal();run2(()=>api('dev_create_hotel',p),'Hotel aggiunto')},
+  locate(v){ui.locating=v;toast('Tocca la mappa nel punto dell\'hotel');scrollTo(0,0)},
+  delhotel(v){const b=(ui.hotels||[]).find(x=>x.id===v);confirmBox(`Eliminare <b>${h(b?.name)}</b> con tutto il personale, i turni e le note? Non si può annullare.`,'Elimina',()=>run2(()=>api('dev_delete_hotel',{business_id:v}),'Hotel eliminato'),true)},
+  persodept(v){ui.perso={...ui.perso,dept:v,data:null,draft:null,err:''};render()},
+  persoparse(){const t=document.getElementById('perso-text').value.trim();ui.perso.text=t;if(!t)return toast('Scrivi qualcosa');
+    const ppl=employees(ui.perso.dept).filter(m=>m.id!==D.me.id);ui.perso.draft=parseNotes(t,ppl);render()},
+  draftdel(v){const[i,j]=v.split('|').map(Number);ui.perso.draft[i].rules.splice(j,1);render()},
+  draftcancel(){ui.perso.draft=null;render()},
+  async draftsave(){const d=ui.perso.draft;try{for(const e of d)await api('add_note',{member_id:e.person.id,text:e.text,rules:e.rules});ui.perso.draft=null;ui.perso.text='';toast('Salvato');await loadPerso()}catch(e){toast(e.message)}},
+  ruledel(v){confirmBox('Eliminare questa regola?','Elimina',async()=>{try{await api('delete_rule',{rule_id:v});await loadPerso()}catch(e){toast(e.message)}},true)},
+  notedel(v){confirmBox('Eliminare questa nota? Le regole già create restano finché non le elimini.','Elimina',async()=>{try{await api('delete_note',{note_id:v});await loadPerso()}catch(e){toast(e.message)}},true)},
+  ruleadd(v){const m=mem(v),sh=shiftsOf(m.department_id);
+    modal(`<h3>Regola per ${h(m.name)}</h3><label class="f">Tipo<select id="ra-kind"><option value="avoid_shift">Evitare un turno</option><option value="prefer_shift">Preferire un turno</option><option value="only_shifts">Solo questo turno</option><option value="max_per_month">Massimo al mese</option><option value="unavailable_weekday">Mai in questo giorno</option><option value="avoid_weekday">Evitare questo giorno</option></select></label>
+    <div class="two"><label class="f">Turno<select id="ra-shift">${sh.map(s=>`<option value="${s.code}">${h(s.name)}</option>`).join('')}</select></label><label class="f">Giorno<select id="ra-wd">${WD.map((d,i)=>`<option value="${i}">${d}</option>`).join('')}</select></label>
+    <label class="f">Quanti al mese<input type="number" id="ra-val" min="0" max="31" value="2"></label><label class="f">Priorità<select id="ra-w"><option value="1">Bassa</option><option value="2" selected>Media</option><option value="3">Alta</option></select></label></div>`,
+    `<button class="ghost" data-act="mclose">Annulla</button><button class="primary" data-act="ruleaddok" data-v="${v}">Aggiungi</button>`)},
+  async ruleaddok(v){const g=id=>document.getElementById(id).value,m=mem(v);const r={kind:g('ra-kind'),shift_code:g('ra-shift'),shift_codes:[g('ra-shift')],weekday:+g('ra-wd'),value:+g('ra-val'),weight:+g('ra-w')};r.label=ruleLabel(r,m.department_id);
+    closeModal();try{await api('add_note',{member_id:v,text:'',rules:[r]});toast('Regola aggiunta');await loadPerso()}catch(e){toast(e.message)}},
+  prefparse(){const t=document.getElementById('pref-text').value.trim();ui.prefs.text=t;if(!t)return toast('Scrivi qualcosa');
+    const r=parseNotes(t,[],{id:D.me.id,name:D.me.name,department_id:D.me.department_id})[0];ui.prefs.draft={text:t,rules:(r?r.rules:[]).map(x=>({...x,weight:Math.min(2,x.weight)}))};render()},
+  prefdraftdel(v){ui.prefs.draft.rules.splice(+v,1);render()},
+  prefcancel(){ui.prefs.draft=null;render()},
+  async prefsave(){try{await api('add_preference',{text:ui.prefs.draft.text,rules:ui.prefs.draft.rules});ui.prefs.draft=null;ui.prefs.text='';toast('Preferenza salvata');await loadPrefs()}catch(e){toast(e.message)}},
+  myruledel(v){confirmBox('Eliminare questa regola?','Elimina',async()=>{try{await api('delete_rule',{rule_id:v});await loadPrefs()}catch(e){toast(e.message)}},true)},
+  mypredel(v){confirmBox('Eliminare questa preferenza?','Elimina',async()=>{try{await api('delete_preference',{preference_id:v});await loadPrefs()}catch(e){toast(e.message)}},true)},
+  editemp(v){const m=mem(v);
+    modal(`<h3>${h(m.name)}</h3><label class="f">Nome<input id="ee-name" value="${h(m.name)}"></label><label class="f">Ruolo<input id="ee-job" value="${h(m.job||'')}"></label>
+    <label class="f">Team<select id="ee-dept"><option value="">— Nessuno —</option>${D.departments.map(d=>`<option value="${d.id}" ${d.id===m.department_id?'selected':''}>${h(d.name)}</option>`).join('')}</select></label>
+    <label class="f">Mansioni (separate da virgola)<input id="ee-skills" list="skills-list" value="${h((m.skills||[]).join(', '))}"></label>
+    ${m.id!==D.me.id?`<div class="toggle"><input type="checkbox" id="ee-admin" ${m.role==='manager'?'checked':''}><label for="ee-admin">Direzione: gestisce tutto l'hotel</label></div>`:''}`,
+    `${m.id!==D.me.id?`${m.user_id?`<button class="ghost" data-act="resetpw" data-v="${m.id}">Password</button>`:''}<button class="ghost danger" data-act="delemp" data-v="${m.id}">Rimuovi</button>`:''}<button class="primary" data-act="editempok" data-v="${m.id}">Salva</button>`)},
+  editempok(v){const g=id=>document.getElementById(id);const p={member_id:v,name:g('ee-name').value,job:g('ee-job').value,department_id:g('ee-dept').value||null,skills:g('ee-skills').value};if(g('ee-admin'))p.role=g('ee-admin').checked?'manager':'employee';closeModal();run(()=>api('update_member',p),'Salvato')},
+  async addemp(){const g=id=>document.getElementById(id).value.trim();const nm=g('n-name'),em=g('n-email'),dp=g('n-dept'),job=g('n-job'),skills=g('n-skills');
+    if(!nm)return toast('Inserisci il nome');if(!em&&!ui.dev)return toast('Inserisci l\'email');
+    const r=await run(()=>api('add_member',{name:nm,email:em||undefined,department_id:dp==='__mgr'?null:dp,role:dp==='__mgr'?'manager':'employee',job,skills}));
+    if(r&&r.password)showCred(nm,em,r.password,true)},
+  needadd(v){document.getElementById('needs-'+v).insertAdjacentHTML('beforeend',needRow())},
+  needdel(_v,t){t.closest('.needrow').remove()},
+  needsave(v){const rows=[...document.querySelectorAll('#needs-'+v+' .needrow')].map(r=>({skill:r.querySelector('[data-n=skill]').value.trim()||null,weekday:r.querySelector('[data-n=weekday]').value===''?null:+r.querySelector('[data-n=weekday]').value,need:+r.querySelector('[data-n=need]').value}));
+    run(()=>api('save_needs',{shift_type_id:v,rows}),'Fabbisogno salvato')}
+});
+document.addEventListener('change',ev=>{
+  const t=ev.target;
+  if(t.dataset&&t.dataset.team){const[dpId,f]=t.dataset.team.split('|');const dp=dept(dpId);const p={department_id:dpId,scheduler_id:dp.scheduler_id,deputy_id:dp.deputy_id};p[f]=t.value||null;run(()=>api('set_team_roles',p),'Responsabili aggiornati')}
+  if(t.id==='f-devnotes'){api('dev_settings',{dev_reads_notes:t.checked}).then(()=>{ui.devNotes=t.checked;toast(t.checked?'Puoi leggere le note riservate':'Note riservate: accesso sviluppatore spento')}).catch(e=>toast(e.message))}
+});
+document.addEventListener('submit',async ev=>{
+  if(ev.target.id!=='f-devboot')return;
+  const f=new FormData(ev.target);ui.err='';
+  try{await api('dev_bootstrap',{name:f.get('name'),email:f.get('email'),password:f.get('password')});
+    const{error}=await sb.auth.signInWithPassword({email:String(f.get('email')).trim().toLowerCase(),password:f.get('password')});if(error)throw error;history.replaceState(null,'',location.pathname)}
+  catch(e){ui.err=e.message;render()}
+});
 </script>
 </body>
 </html>
