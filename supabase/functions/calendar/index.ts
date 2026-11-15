@@ -21,6 +21,11 @@ Deno.serve(async (req) => {
   const url = new URL(req.url);
   const token = url.searchParams.get('t') || '';
   if (!/^[a-f0-9]{64}$/.test(token)) return new Response('Link non valido', { status: 404 });
+  const ip = (req.headers.get('x-forwarded-for') || '').split(',')[0].trim() || 'ip?';
+  for (const [k, max] of [['cal:ip:' + ip, 300], ['cal:t:' + token.slice(0, 16), 60]] as [string, number][]) {
+    const { data } = await db.rpc('rl_hit', { p_key: k, p_max: max, p_window_s: 3600 });
+    if (data === false) return new Response('Troppe richieste', { status: 429, headers: { 'Retry-After': '3600' } });
+  }
   const { data: tok } = await db.from('calendar_tokens').select('member_id').eq('token', token).maybeSingle();
   if (!tok) return new Response('Link non valido', { status: 404 });
   const { data: m } = await db.from('members').select('*').eq('id', tok.member_id).eq('active', true).maybeSingle();

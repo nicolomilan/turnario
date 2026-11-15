@@ -45,6 +45,12 @@ async function q<T = any>(p: PromiseLike<{ data: T; error: any }>): Promise<T> {
   if (error) { console.error(error); fail(500, error.message || 'Errore database'); }
   return data;
 }
+// limite di frequenza: protegge da abusi e da bollette impreviste
+async function limit(key: string, max: number, windowS: number) {
+  const { data, error } = await db.rpc('rl_hit', { p_key: key, p_max: max, p_window_s: windowS });
+  if (error) { console.warn('rate limit', error.message); return; }
+  if (data === false) fail(429, 'Troppe richieste in poco tempo: riprova tra qualche minuto.');
+}
 async function log(b: string, text: string) { await db.from('audit_log').insert({ business_id: b, text }); }
 
 async function sendEmail(to: string, subject: string, text: string) {
@@ -827,15 +833,21 @@ Deno.serve(async (req) => {
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...CORS, 'Content-Type': 'application/json' } });
   try {
     if (req.method !== 'POST') fail(405, 'Usa POST.');
-    const body = await req.json().catch(() => ({}));
+    const raw = await req.text();
+    if (raw.length > 64000) fail(413, 'Richiesta troppo grande.');
+    let body: any = {}; try { body = JSON.parse(raw || '{}'); } catch { fail(400, 'Richiesta non valida.'); }
+    const ip = (req.headers.get('x-forwarded-for') || '').split(',')[0].trim() || 'ip?';
     const fn = H[body.action], dfn = D[body.action];
     if (!fn && !dfn) fail(400, 'Azione sconosciuta.');
-    if (body.action === 'signup_business') return json(await fn(null, body));
-    if (body.action === 'dev_bootstrap') return json(await dfn(null, body));
+    if (body.action === 'signup_business') { await limit('signup:ip:' + ip, 5, 3600); await limit('signup:all', 50, 86400); return json(await fn(null, body)); }
+    if (body.action === 'dev_bootstrap') { await limit('boot:ip:' + ip, 5, 3600); return json(await dfn(null, body)); }
+    await limit('ip:' + ip, 600, 60);
     const token = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
     const { data, error } = await db.auth.getUser(token);
     if (error || !data.user) fail(401, 'Sessione scaduta: accedi di nuovo.');
     const user = data.user!;
+    await limit('user:' + user.id, 120, 60);
+    if (['generate', 'preview_request', 'create_request', 'dev_create_hotel', 'add_member', 'reset_password'].includes(body.action)) await limit('heavy:' + user.id, 30, 600);
     if (dfn) return json(await dfn(user, body));
     let me: Me | null = null;
     if (body.as_member) {
