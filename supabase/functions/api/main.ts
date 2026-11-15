@@ -232,7 +232,9 @@ H.signup_business = async (_me, p) => {
     const dep = await q(db.from('departments').insert({ business_id: biz.id, name: t.name, position: i++ }).select().single()) as any;
     await q(db.from('shift_types').insert(t.shifts.map((s: any, k: number) => ({ ...s, business_id: biz.id, department_id: dep.id, position: k }))));
   }
-  await q(db.from('members').insert({ business_id: biz.id, user_id: user.id, name, email, role: 'manager', job: 'Responsabile' }));
+  const boss = await q(db.from('members').insert({ business_id: biz.id, user_id: user.id, name, email, role: 'manager', job: 'Responsabile' }).select().single()) as any;
+  // all'inizio il responsabile fa i turni di tutti i team: poi li assegna ad altri da Personale
+  await q(db.from('departments').update({ scheduler_id: boss.id }).eq('business_id', biz.id));
   await log(biz.id, `${name} ha creato ${bname}.`);
   return { ok: true };
 };
