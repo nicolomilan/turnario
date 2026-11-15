@@ -71,49 +71,114 @@ export function violFlagsCtx(seq, shifts, rules, pre = [], post = []) {
   return violFlags(joinCtx(seq, pre, post), shifts, rules).slice(pre.length, pre.length + seq.length);
 }
 
-// Genera i turni di un reparto per un mese. Ritorna { seq: {memberId: [...]}, score }
-export function generateDept({ shifts, memberIds, n, rules, seed, pre = {} }) {
+// ---------- Regole personali (preferenze del dipendente e note del responsabile) ----------
+// Regola: { kind, shift_code, shift_codes, weekday, value, weight(1-3), source('pref'|'note') }
+// Vincoli rigidi: only_shifts, max_per_month, unavailable_weekday. Gli altri pesano sul punteggio.
+export function ruleViolations(seq, mrules = [], dow = () => -1) {
+  if (!mrules.length) return 0;
+  let v = 0; const cnt = {};
+  const only = mrules.find((r) => r.kind === 'only_shifts');
+  const maxes = mrules.filter((r) => r.kind === 'max_per_month');
+  seq.forEach((c, d) => {
+    if (c === 'R') return;
+    cnt[c] = (cnt[c] || 0) + 1;
+    if (mrules.some((r) => r.kind === 'unavailable_weekday' && r.weekday === dow(d))) v++;
+    if (only && !(only.shift_codes || []).includes(c) && !maxes.some((r) => r.shift_code === c)) v++;
+  });
+  maxes.forEach((r) => { if ((cnt[r.shift_code] || 0) > r.value) v += cnt[r.shift_code] - r.value; });
+  return v;
+}
+// costo "morbido": quanto il turno va contro preferenze e note (più basso = meglio)
+export function softCost(code, d, mrules = [], dow = () => -1) {
+  let s = 0;
+  for (const r of mrules) {
+    const k = r.source === 'note' ? 1 : 0.45; // le note del responsabile pesano più delle preferenze
+    if (r.kind === 'avoid_shift' && r.shift_code === code) s += 5 * r.weight * k;
+    if (r.kind === 'prefer_shift' && r.shift_code === code) s -= 4 * r.weight * k;
+    if (r.kind === 'avoid_weekday' && r.weekday === dow(d)) s += 4 * r.weight * k;
+  }
+  return s;
+}
+const seqSoft = (seq, mrules, dow) => seq.reduce((a, c, d) => a + (c === 'R' ? 0 : softCost(c, d, mrules, dow)), 0);
+
+// Posti da coprire in un giorno: per turno e mansione (es. Mattina·cameriere 3 il sabato).
+export function slotsFor(shifts, needs, weekday) {
+  const out = [];
+  for (const sh of shifts) {
+    const rows = needs.filter((x) => x.shift_code === sh.code);
+    if (!rows.length) { if (sh.need > 0) out.push({ code: sh.code, skill: null, need: sh.need }); continue; }
+    const bySkill = {};
+    rows.forEach((r) => { const k = r.skill || ''; if (r.weekday === null || r.weekday === undefined) { if (!(k in bySkill)) bySkill[k] = r.need; } });
+    rows.forEach((r) => { if (r.weekday === weekday) bySkill[r.skill || ''] = r.need; });
+    Object.entries(bySkill).forEach(([k, need]) => { if (need > 0) out.push({ code: sh.code, skill: k || null, need }); });
+  }
+  return out;
+}
+
+// Genera i turni di un reparto per un mese. Ritorna { seq, skillSeq, score, uncovered, exceptions }
+export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skills = {}, needs = [], memberRules = {}, dow = () => -1 }) {
   const R = rng(seed), T = targetDays(n, rules), emps = memberIds;
-  const seq = {}, w = {}, consec = {}, cnt = {};
+  const seq = {}, sk = {}, w = {}, consec = {}, cnt = {};
   const P = CTX_DAYS; // i primi P giorni sono la coda del mese precedente
   emps.forEach((e) => {
     const tail = (pre[e] || []).slice(-P);
     seq[e] = [...Array(P - tail.length).fill('R'), ...tail, ...Array(n).fill('R')];
+    sk[e] = Array(n).fill(null);
     w[e] = 0; cnt[e] = {}; consec[e] = 0;
     for (let j = P - 1; j >= 0 && seq[e][j] !== 'R'; j--) consec[e]++;
     shifts.forEach((s) => (cnt[e][s.code] = 0));
   });
-  const order = [...shifts].sort((a, b) => toMin(b.start_time) - toMin(a.start_time));
+  const has = (e, skill) => !skill || (skills[e] || []).includes(skill);
+  const rarity = (skill) => emps.filter((e) => has(e, skill)).length;
+  const start = Object.fromEntries(shifts.map((s) => [s.code, toMin(s.start_time)]));
   const nights = nightCodes(shifts), kN = restAfterNight(rules);
+  // vincoli rigidi personali
+  const hardOk = (e, code, md) => {
+    const mr = memberRules[e]; if (!mr || !mr.length) return true;
+    if (mr.some((r) => r.kind === 'unavailable_weekday' && r.weekday === dow(md))) return false;
+    const mx = mr.find((r) => r.kind === 'max_per_month' && r.shift_code === code);
+    if (mx && cnt[e][code] >= mx.value) return false;
+    const only = mr.find((r) => r.kind === 'only_shifts');
+    if (only && !(only.shift_codes || []).includes(code) && !mx) return false;
+    return true;
+  };
   let unc = 0;
   for (let d = P; d < P + n; d++) {
-    const used = new Set();
-    for (const sh of order) {
-      const avg = emps.reduce((a, x) => a + cnt[x][sh.code], 0) / (emps.length || 1);
-      for (let k = 0; k < sh.need; k++) {
+    const md = d - P, used = new Set();
+    const slots = slotsFor(shifts, needs, dow(md)).sort((a, b) => rarity(a.skill) - rarity(b.skill) || start[b.code] - start[a.code]);
+    for (const sl of slots) {
+      const avg = emps.reduce((a, x) => a + cnt[x][sl.code], 0) / (emps.length || 1);
+      for (let k = 0; k < sl.need; k++) {
         let best = null, bs = Infinity;
         // 1) limite normale  2) un giorno extra sul monte  3) eccezione: 6° giorno di fila solo se serve a coprire
         for (const [cap, extra] of [[rules.maxConsec, 0], [rules.maxConsec, 1], [exCap(rules), 1]]) {
           for (const e of emps) {
-            if (used.has(e) || consec[e] >= cap || w[e] >= T + extra) continue;
+            if (used.has(e) || !has(e, sl.skill) || consec[e] >= cap || w[e] >= T + extra) continue;
             const prev = seq[e][d - 1], prev2 = seq[e][d - 2];
-            if (prev !== 'R' && !gapOk(shifts, prev, sh.code, rules)) continue;
-            if (kN > 0 && !nightRestOk(seq[e], d, sh.code, nights, kN)) continue;
-            let s = (w[e] - (T * (d - P + 1)) / n) * 4 + (cnt[e][sh.code] - avg) * 1.5 + consec[e] * 0.4 + R() * 1.5;
-            if (prev === sh.code) s -= nights.has(sh.code) ? 9 : 4; // serie di notti più lunghe = meno riposi sprecati
+            if (prev !== 'R' && !gapOk(shifts, prev, sl.code, rules)) continue;
+            if (kN > 0 && !nightRestOk(seq[e], d, sl.code, nights, kN)) continue;
+            if (!hardOk(e, sl.code, md)) continue;
+            let s = (w[e] - (T * (md + 1)) / n) * 4 + (cnt[e][sl.code] - avg) * 1.5 + consec[e] * 0.4 + R() * 1.5;
+            if (prev === sl.code) s -= nights.has(sl.code) ? 9 : 4; // serie di notti più lunghe = meno riposi sprecati
             if (prev === 'R') s += prev2 !== 'R' ? 3 : -1;
+            if (sl.skill !== 'manager' && has(e, 'manager')) s += 3; // il manager resta libero per i posti da manager
+            s += softCost(sl.code, md, memberRules[e], dow);
             if (s < bs) { bs = s; best = e; }
           }
           if (best) break;
         }
-        if (best) { seq[best][d] = sh.code; used.add(best); w[best]++; cnt[best][sh.code]++; } else unc++;
+        if (best) { seq[best][d] = sl.code; sk[best][md] = sl.skill; used.add(best); w[best]++; cnt[best][sl.code]++; } else unc++;
       }
     }
     emps.forEach((e) => (consec[e] = seq[e][d] === 'R' ? 0 : consec[e] + 1));
   }
-  let exc = 0;
-  emps.forEach((e) => { exc += softFlags(seq[e], rules).slice(P).filter(Boolean).length; seq[e] = seq[e].slice(P); });
-  let score = unc * 1000 + exc * 40;
+  let exc = 0, soft = 0;
+  emps.forEach((e) => {
+    exc += softFlags(seq[e], rules).slice(P).filter(Boolean).length;
+    seq[e] = seq[e].slice(P);
+    soft += seqSoft(seq[e], memberRules[e] || [], dow);
+  });
+  let score = unc * 1000 + exc * 40 + soft;
   emps.forEach((e) => {
     score += (w[e] - T) ** 2 * 5;
     for (let d = 1; d < n - 1; d++) if (seq[e][d] === 'R' && seq[e][d - 1] !== 'R' && seq[e][d + 1] !== 'R') score += 2;
@@ -123,7 +188,7 @@ export function generateDept({ shifts, memberIds, n, rules, seed, pre = {} }) {
     const m = a.reduce((x, y) => x + y, 0) / (a.length || 1);
     score += a.reduce((x, y) => x + (y - m) ** 2, 0);
   });
-  return { seq, score, uncovered: unc, exceptions: exc };
+  return { seq, skillSeq: sk, score, uncovered: unc, exceptions: exc };
 }
 
 export function bestSchedule(opts, tries = 60) {
@@ -136,27 +201,32 @@ export function bestSchedule(opts, tries = 60) {
 }
 
 // Trova i colleghi che possono coprire il giorno d del richiedente a.
-// ctx: { seqs: {id: []}, colleagues: [ids stesso reparto], shifts, rules, n, locked(id,d) }
+// ctx: { seqs, skillSeqs, skills, memberRules, dow, colleagues, shifts, rules, n, locked(id,d), pre, post }
 export function findOffers(ctx, a, d, exDays = [], exEmps = []) {
   const { seqs, colleagues, shifts, n, locked } = ctx, rules = ctx.rules, HR = hardRules(rules);
-  const V = (id, sq) => violationsCtx(sq, shifts, HR, ctx.pre?.[id], ctx.post?.[id]);
+  const dow = ctx.dow || (() => -1), MR = (id) => (ctx.memberRules || {})[id] || [];
+  const V = (id, sq) => violationsCtx(sq, shifts, HR, ctx.pre?.[id], ctx.post?.[id]) + ruleViolations(sq, MR(id), dow);
   const X = (id, sq) => softFlags(joinCtx(sq, ctx.pre?.[id], ctx.post?.[id]), rules).filter(Boolean).length; // giorni eccezionali
+  const S = (id, sq) => seqSoft(sq, MR(id), dow);
+  const has = (id, skill) => !skill || ((ctx.skills || {})[id] || []).includes(skill);
+  const skillOf = (id, day) => ctx.skillSeqs?.[id]?.[day] ?? null;
   const sa = seqs[a], sh = sa[d];
   if (!sh || sh === 'R') return [];
   const T = targetDays(n, rules), vA = V(a, sa), res = [];
   for (const b of colleagues) {
     if (b === a || exEmps.includes(b)) continue;
     const sb = seqs[b];
-    if (!sb || sb[d] !== 'R' || locked(b, d)) continue;
+    if (!sb || sb[d] !== 'R' || locked(b, d) || !has(b, skillOf(a, d))) continue;
     const vB = V(b, sb);
     let best = null;
     for (let d2 = 0; d2 < n; d2++) {
-      if (d2 === d || exDays.includes(d2) || sa[d2] !== 'R' || sb[d2] === 'R' || locked(a, d2)) continue;
+      if (d2 === d || exDays.includes(d2) || sa[d2] !== 'R' || sb[d2] === 'R' || locked(a, d2) || !has(a, skillOf(b, d2))) continue;
       const s2 = sb[d2];
       const na = [...sa]; na[d] = 'R'; na[d2] = s2;
       const nb = [...sb]; nb[d] = sh; nb[d2] = 'R';
       if (V(a, na) > vA || V(b, nb) > vB) continue;
-      const sc = 1 + Math.abs(d2 - d) * 0.3 + (X(a, na) > X(a, sa) || X(b, nb) > X(b, sb) ? 3 : 0);
+      const sc = 1 + Math.abs(d2 - d) * 0.3 + (X(a, na) > X(a, sa) || X(b, nb) > X(b, sb) ? 3 : 0)
+        + Math.max(0, (S(a, na) - S(a, sa) + S(b, nb) - S(b, sb)) * 0.2);
       if (!best || sc < best.score) best = { type: 'swap', d2, s2, score: sc };
     }
     const wB = sb.filter((x) => x !== 'R').length;
@@ -164,7 +234,7 @@ export function findOffers(ctx, a, d, exDays = [], exEmps = []) {
       const na = [...sa]; na[d] = 'R';
       const nb = [...sb]; nb[d] = sh;
       if (V(a, na) <= vA && V(b, nb) <= vB) {
-        const sc = 2.5 - (T - wB) * 0.5 + (X(b, nb) > X(b, sb) ? 3 : 0);
+        const sc = 2.5 - (T - wB) * 0.5 + (X(b, nb) > X(b, sb) ? 3 : 0) + Math.max(0, (S(b, nb) - S(b, sb)) * 0.2);
         if (!best || sc < best.score) best = { type: 'cover', score: sc };
       }
     }
@@ -176,14 +246,18 @@ export function findOffers(ctx, a, d, exDays = [], exEmps = []) {
 // Verifica che uno scambio sia ancora applicabile sui turni attuali.
 export function offerValid(ctx, o) {
   const { seqs, shifts, locked } = ctx, HR = hardRules(ctx.rules);
-  const V = (id, sq) => violationsCtx(sq, shifts, HR, ctx.pre?.[id], ctx.post?.[id]);
+  const dow = ctx.dow || (() => -1), MR = (id) => (ctx.memberRules || {})[id] || [];
+  const V = (id, sq) => violationsCtx(sq, shifts, HR, ctx.pre?.[id], ctx.post?.[id]) + ruleViolations(sq, MR(id), dow);
+  const has = (id, skill) => !skill || ((ctx.skills || {})[id] || []).includes(skill);
   const sa = seqs[o.from], sb = seqs[o.to];
   if (!sa || !sb) return false;
   if (sa[o.d] !== o.shift || sb[o.d] !== 'R' || locked(o.to, o.d)) return false;
+  if (!has(o.to, ctx.skillSeqs?.[o.from]?.[o.d] ?? null)) return false;
   const na = [...sa], nb = [...sb];
   na[o.d] = 'R'; nb[o.d] = o.shift;
   if (o.type === 'swap') {
     if (sa[o.d2] !== 'R' || sb[o.d2] !== o.s2 || locked(o.from, o.d2)) return false;
+    if (!has(o.from, ctx.skillSeqs?.[o.to]?.[o.d2] ?? null)) return false;
     na[o.d2] = o.s2; nb[o.d2] = 'R';
   }
   return V(o.from, na) <= V(o.from, sa) && V(o.to, nb) <= V(o.to, sb);
