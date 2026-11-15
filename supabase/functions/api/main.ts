@@ -727,7 +727,8 @@ H.delete_preference = async (me, p) => {
 /* ---------- sviluppatore ---------- */
 const TEMPLATE_FULL = [
   { key: 'dir', name: 'Direzione', shifts: [
-    { code: 'G', name: 'Giornata', start_time: '09:00', end_time: '17:00', need: 2, color: '#0E7490' },
+    { code: 'G', name: 'Giornata', start_time: '09:00', end_time: '17:00', need: 0, color: '#0E7490', needs: [
+      { skill: null, weekday: null, need: 1 }, ...[1, 2, 3, 4, 5].map((w) => ({ skill: null, weekday: w, need: 2 }))] },
     { code: 'S', name: 'Sera', start_time: '14:00', end_time: '22:00', need: 1, color: '#6D28D9' }] },
   { key: 'fo', name: 'Front Office', shifts: [
     { code: 'M', name: 'Mattina', start_time: '07:00', end_time: '15:00', need: 2, color: '#D97706' },
