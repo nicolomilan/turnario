@@ -389,6 +389,9 @@ const canEditMember=id=>{const m=mem(id);return !!m&&canEditTeam(m.department_id
 // pubblicazione: un mese in bozza lo vedono solo la direzione e chi fa i turni del team
 const isPublished=(depId,month=ui.month)=>(D.pubs||[]).some(p=>p.department_id===depId&&p.month.slice(0,7)===month);
 const isLocked=(id,d)=>D.locks&&D.locks.has(id+'|'+dateOf(d));
+// ferie, permessi e malattia approvati
+const LVL={ferie:['Fe','Ferie'],permesso:['Pe','Permesso'],malattia:['Ma','Malattia']};
+const leaveOn=(id,d)=>{const ds=typeof d==='number'?dateOf(d):d;return(D.leaves||[]).find(l=>l.member_id===id&&l.status==='approved'&&l.date_from<=ds&&l.date_to>=ds)};
 const initials=n=>n.split(' ').map(x=>x[0]).slice(0,2).join('').toUpperCase();
 const AVC=['#1F4E46','#9A3412','#1E40AF','#6D28D9','#0E7490','#A21CAF','#4D7C0F','#B45309'];
 const avColor=id=>{let x=0;for(const c of String(id))x=(x*31+c.charCodeAt(0))|0;return AVC[Math.abs(x)%AVC.length]};
@@ -440,7 +443,7 @@ async function loadAll(){
     const ms=months.map(x=>x.month.slice(0,7));
     if(!ui.month){const cur=todayStr().slice(0,7);ui.month=ms.includes(cur)?cur:(ms.find(m=>m>cur)||ms[ms.length-1]||(isMgrRole(me)?monthAdd(cur,1):cur))}
     const from=`${ui.month}-01`,to=`${ui.month}-${pad(new Date(+ui.month.slice(0,4),+ui.month.slice(5,7),0).getDate())}`;
-    const [assignments0,days,offers,notifs,log,events,pubs,locks]=await Promise.all([
+    const [assignments0,days,offers,notifs,log,events,pubs,locks,leaves]=await Promise.all([
       sel(sb.from('assignments').select('member_id,day,code,skill').eq('business_id',b).gte('day',addD(from,-7)).lte('day',addD(to,7))),
       sel(sb.from('request_days').select('*').eq('business_id',b).gte('day',from).lte('day',to)),
       sel(sb.from('offers').select('*').eq('business_id',b).or(`and(day.gte.${from},day.lte.${to}),status.eq.pending`)),
@@ -448,10 +451,11 @@ async function loadAll(){
       (me.role==='manager'||departments.some(d=>d.scheduler_id===me.id||d.deputy_id===me.id))?sel(sb.from('audit_log').select('*').eq('business_id',b).order('created_at',{ascending:false}).limit(30)):Promise.resolve([]),
       sel(sb.from('events').select('*').eq('business_id',b).lte('date_from',to).gte('date_to',from).order('date_from')),
       sel(sb.from('publications').select('department_id,month').eq('business_id',b)),
-      sel(sb.from('cell_locks').select('member_id,day').eq('business_id',b).gte('day',from).lte('day',to))]);
+      sel(sb.from('cell_locks').select('member_id,day').eq('business_id',b).gte('day',from).lte('day',to)),
+      sel(sb.from('leaves').select('*').eq('business_id',b).lte('date_from',to).gte('date_to',from))]);
     const reqIds=[...new Set(days.map(x=>x.request_id).concat(offers.map(o=>o.request_id)))];
     const requests=reqIds.length?await sel(sb.from('requests').select('*').in('id',reqIds).order('created_at',{ascending:false})):[];
-    D={me,business,departments,shifts,members,months:ms,assignments:assignments0,days,offers,notifs,log,requests,needs,events,pubs,locks:new Set(locks.map(l=>l.member_id+'|'+l.day))};
+    D={me,business,departments,shifts,members,months:ms,assignments:assignments0,days,offers,notifs,log,requests,needs,events,pubs,leaves,locks:new Set(locks.map(l=>l.member_id+'|'+l.day))};
     // (serve per "Vedi come": il server già nasconde le bozze a chi non fa i turni)
     D.assignments=assignments0.filter(a=>{const m=mem(a.member_id);return !m||canEditTeam(m.department_id)||isPublished(m.department_id,a.day.slice(0,7))});
     if(ui.preview&&ui.preview.month!==ui.month)ui.preview=null;
@@ -488,7 +492,7 @@ const I={
  user:'<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4.2-6 8-6s7 2 8 6"/></svg>'};
 const LOGO='<svg width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4FA3FF"/><stop offset="1" stop-color="#0057D9"/></linearGradient></defs><rect x="1" y="1" width="30" height="30" rx="9" fill="url(#lg)"/><rect x="1.5" y="1.5" width="29" height="29" rx="8.5" fill="none" stroke="#fff" stroke-opacity=".35"/><rect x="8" y="10" width="7" height="5.5" rx="2" fill="#fff"/><rect x="17" y="10" width="7" height="5.5" rx="2" fill="#fff" opacity=".55"/><rect x="8" y="17.5" width="7" height="5.5" rx="2" fill="#fff" opacity=".55"/><rect x="17" y="17.5" width="7" height="5.5" rx="2" fill="#FFD60A"/></svg>';
 const ST={pending:['In attesa di un collega','warn'],claiming:['In aggiornamento','warn'],awaiting_manager:['In attesa del responsabile','warn'],approved:['Approvato','ok'],failed:['Nessun collega disponibile','bad'],already:['Era già riposo',''],cancelled:['Annullata',''],rejected:['Rifiutata dal responsabile','bad'],handled:['Gestita dal responsabile','']};
-const OST={pending:'in attesa',accepted:'ha accettato ✓',declined:'ha rifiutato',superseded:'non più necessaria',invalid:'non più valida',withdrawn:'ritirata'};
+const OST={pending:'in attesa',accepted:'ha accettato ✓',declined:'ha rifiutato',superseded:'non più necessaria',invalid:'non più valida',withdrawn:'ritirata',expired:'non ha risposto in tempo'};
 
 function toast(t){const el=document.getElementById('toast');el.textContent=t;el.classList.add('on');clearTimeout(toast._t);toast._t=setTimeout(()=>el.classList.remove('on'),3200)}
 function modal(html,actions){document.getElementById('modal').innerHTML=`<div class="back"><div class="box">${html}<div class="row" style="justify-content:flex-end;margin-top:6px">${actions}</div></div></div>`}
@@ -569,9 +573,10 @@ V.mese=()=>{
   const nx=seq.findIndex((c,d)=>c!=='R'&&dateOf(d)>=today),ns=nx>=0&&sdef(me.department_id,seq[nx]);
   const hero=ns?`<div class="next" style="--c:${ns.color}"><small>${dateOf(nx)===today?'Oggi':'Prossimo turno'}</small><b>${fmt(nx)}</b><span>${h(ns.name)} · ${ns.start_time}–${ns.end_time}</span></div>`:'';
   const rows=seq.map((c,d)=>{const ds=dateOf(d),tag=dayTag(me.id,d),past=ds<today;
-    const evt=eventsOn(ds).map(e=>`<span class="tag ev-${e.impact}">${h(e.name)}</span>`).join('');
-    return`${d===0||dow(d)===1?`<div class="wk">Settimana del ${d+1}</div>`:''}<div class="day ${isWe(d)?'we':''} ${past?'past':''} ${ds===today?'today':''}"><div class="dd"><small>${GG[dow(d)]}</small><b>${d+1}</b></div><div class="ds">${shiftPill(me.department_id,c)}${tag}${evt}</div>${c!=='R'&&!tag&&!past?`<button class="ghost sm" data-act="quickreq" data-v="${d}">Chiedi libero</button>`:''}</div>`}).join('');
-  return`<h2>${monthLabel(ui.month)}</h2>${pick}${hero}<div class="stats"><div><b>${w}</b><small>giorni di lavoro</small></div><div><b>${n-w}</b><small>riposi</small></div><div><b>${target()}</b><small>monte giorni</small></div></div><div class="chips">${chips}</div><div class="days">${rows}</div>`;
+    const lv=leaveOn(me.id,d),hn=holidayName(ds);
+    const evt=(lv?`<span class="tag info">${LVL[lv.kind][1]}</span>`:'')+(hn?`<span class="tag bad">${h(hn)}</span>`:'')+eventsOn(ds).map(e=>`<span class="tag ev-${e.impact}">${h(e.name)}</span>`).join('');
+    return`${d===0||dow(d)===1?`<div class="wk">Settimana del ${d+1}</div>`:''}<div class="day ${isWe(d)?'we':''} ${past?'past':''} ${ds===today?'today':''}"><div class="dd"><small>${GG[dow(d)]}</small><b>${d+1}</b></div><div class="ds">${shiftPill(me.department_id,c)}${tag}${evt}</div>${c!=='R'&&!tag&&!past?`<div class="row" style="gap:6px;flex-wrap:nowrap"><button class="ghost sm" data-act="swapopt" data-v="${d}">Scambia</button><button class="ghost sm" data-act="quickreq" data-v="${d}">Chiedi libero</button></div>`:''}</div>`}).join('');
+  return`<h2>${monthLabel(ui.month)}</h2>${pick}${hero}<div class="row" style="margin:0 0 12px"><button class="ghost sm" data-act="tab" data-v="ferie">Ferie e permessi</button><button class="ghost sm danger" data-act="absentme">Sono malato/a</button></div><div class="stats"><div><b>${w}</b><small>giorni di lavoro</small></div><div><b>${n-w}</b><small>riposi</small></div><div><b>${target()}</b><small>monte giorni</small></div></div><div class="chips">${chips}</div><div class="days">${rows}</div>`;
 };
 V.richiedi=()=>{
   const me=D.me,n=daysIn(),today=todayStr();
@@ -610,11 +615,13 @@ function reqCard(r,manager){
   const A=mem(r.member_id)||{department_id:null};
   const days=D.days.filter(x=>x.request_id===r.id).sort((a,b)=>a.day<b.day?-1:1);
   const rows=days.map(x=>{const st=ST[x.status]||[x.status,''];const offs=D.offers.filter(o=>o.request_day_id===x.id);
-    const act=manager?(x.status==='awaiting_manager'?`<div class="row" style="margin-top:8px"><button class="primary sm" data-act="approve" data-v="${x.id}">Approva</button><button class="ghost sm" data-act="reject" data-v="${x.id}">Rifiuta</button></div>`:x.status==='failed'?`<div class="row" style="margin-top:8px"><button class="primary sm" data-act="retry" data-v="${x.id}">Riprova con tutti</button><button class="ghost sm" data-act="handled" data-v="${x.id}">Segna gestita</button></div>`:''):'';
+    const ready=offs.filter(o=>['expired','declined','withdrawn'].includes(o.status)).sort((a,b)=>(a.rank||99)-(b.rank||99)).slice(0,3);
+    const opts=manager&&x.status==='failed'&&ready.length?`<div class="asked" style="margin-top:6px">Opzioni pronte:</div>${ready.map(o=>`<button class="ghost sm" style="margin:4px 6px 0 0" data-act="forceoffer" data-v="${o.id}">${h(first(o.to_member))}: ${o.type==='swap'?`scambio con ${fmtS(o.day2)}`:'copertura'}</button>`).join('')}`:'';
+    const act=opts+(manager?(x.status==='awaiting_manager'?`<div class="row" style="margin-top:8px"><button class="primary sm" data-act="approve" data-v="${x.id}">Approva</button><button class="ghost sm" data-act="reject" data-v="${x.id}">Rifiuta</button></div>`:x.status==='failed'?`<div class="row" style="margin-top:8px"><button class="primary sm" data-act="retry" data-v="${x.id}">Riprova con tutti</button><button class="ghost sm" data-act="handled" data-v="${x.id}">Segna gestita</button></div>`:''):'');
     return`<div class="rq-day"><div><b>${fmtS(x.day)}</b> ${x.shift_code!=='R'?`<small>· ${h((sdef(A.department_id,x.shift_code)||{}).name||x.shift_code)}</small>`:''}
     ${offs.length?`<div class="asked">${offs.map(o=>`${h(first(o.to_member))} ${OST[o.status]||o.status}`).join(' · ')}</div>`:''}${act}</div><span class="tag ${st[1]}">${st[0]}</span></div>`}).join('');
   const canCancel=!manager&&days.some(x=>x.status==='pending');
-  return`<div class="card"><div class="ohead">${av(r.member_id)}<div><b>${manager?h(name(r.member_id))+' · ':''}${r.date_from===r.date_to?fmtS(r.date_from):fmtS(r.date_from)+' → '+fmtS(r.date_to)}</b><small>${ago(r.created_at)}${r.note?' · '+h(r.note):''}</small></div></div>${rows}
+  return`<div class="card"><div class="ohead">${av(r.member_id)}<div><b>${manager?h(name(r.member_id))+' · ':''}${r.date_from===r.date_to?fmtS(r.date_from):fmtS(r.date_from)+' → '+fmtS(r.date_to)}</b><small>${r.kind==='scambio'?'Scambio diretto · ':r.kind==='malattia'?'Malattia · ':''}${ago(r.created_at)}${r.note&&r.note!=='Malattia'?' · '+h(r.note):''}</small></div></div>${rows}
   ${canCancel?`<button class="link danger" style="padding-left:0" data-act="cancelreq" data-v="${r.id}">Annulla richiesta</button>`:''}</div>`;
 }
 function notifList(){
@@ -646,7 +653,7 @@ function grid(depId,{editable=false,meId=null}={}){
     +(evs.some(x=>x.length)?`<tr class="evrow"><td class="sticky">Eventi</td>${evs.map((x,d)=>x.length?`<td class="ev-${x.some(e=>e.impact==='busy')?'busy':x.some(e=>e.impact==='quiet')?'quiet':'info'}" data-act="evday" data-v="${dateOf(d)}" title="${h(x.map(e=>e.name).join(', '))}"><span></span></td>`:'<td></td>').join('')}<td></td></tr>`:'');
   const rows=emps.map(e=>{const seq=seqOf(e.id),vf=violFlagsCtx(e.id,depId),sf=softFlagsCtx(e.id);
     return`<tr class="${e.id===meId?'me':''}"><td class="sticky">${h(e.name)}</td>${seq.map((c,d)=>{const s=sdef(depId,c);
-      return`<td class="c ${c==='R'?'R':''} ${editable?'edit':''} ${vf[d]?'viol':sf[d]?'exc':''} ${c==='R'&&isWe(d)?'we':''}" ${s?`style="--c:${s.color}"`:''} ${editable?`data-act="cell" data-v="${e.id}|${d}"`:''}><span>${c==='R'?'·':h(c)}</span>${editable&&isLocked(e.id,d)?'<i class="lk"></i>':''}</td>`}).join('')}<td><b>${seq.filter(x=>x!=='R').length}</b></td></tr>`}).join('');
+      return`<td class="c ${c==='R'?'R':''} ${editable?'edit':''} ${vf[d]?'viol':sf[d]?'exc':''} ${c==='R'&&isWe(d)?'we':''}" ${s?`style="--c:${s.color}"`:''} ${editable?`data-act="cell" data-v="${e.id}|${d}"`:''}><span>${c==='R'?(leaveOn(e.id,d)?`<em class="lv">${LVL[leaveOn(e.id,d).kind][0]}</em>`:'·'):h(c)}</span>${editable&&isLocked(e.id,d)?'<i class="lk"></i>':''}</td>`}).join('')}<td><b>${seq.filter(x=>x!=='R').length}</b></td></tr>`}).join('');
   const cov=covRows(depId,emps,days).map(r=>`<tr class="cov"><td class="sticky">${h(r.label)}</td>${r.cells.map(c=>c?`<td class="${c.k<c.need?'short':''}">${c.k}/${c.need}</td>`:'<td>–</td>').join('')}<td></td></tr>`).join('');
   return`<div class="gridwrap"><table class="grid"><thead>${head}</thead><tbody>${rows}${cov}</tbody></table></div>
   <div class="legend">${sh.map(s=>`<span class="chip"><i style="background:${s.color}"></i><b>${h(s.code)}</b> ${h(s.name)} ${s.start_time}–${s.end_time}</span>`).join('')}<span class="chip">· Riposo</span></div>`;
@@ -761,7 +768,7 @@ const A={
   async copycred(){try{await navigator.clipboard.writeText(document.getElementById('cred').textContent);toast('Copiato')}catch(e){toast('Copia non riuscita: seleziona il testo')}},
   saverules(){const shifts=D.shifts.map(s=>({id:s.id,name:s.name,start_time:s.start_time,end_time:s.end_time,need:s.need}));
     document.querySelectorAll('[data-sh]').forEach(inp=>{const[id,f]=inp.dataset.sh.split('|');const s=shifts.find(x=>x.id===id);if(s)s[f]=f==='need'?+inp.value:inp.value});
-    const r={...rules(),minRest:+document.getElementById('r-rest').value,maxConsec:+document.getElementById('r-consec').value,maxConsecEx:+document.getElementById('r-consecx').value,restPerWeek:+document.getElementById('r-rpw').value,restAfterNight:+document.getElementById('r-night').value,restBlock:+((document.getElementById('r-block')||{}).value??3),freeWeekends:+((document.getElementById('r-wkfree')||{}).value??1),noSingleDays:(document.getElementById('r-single')||{checked:true}).checked,sendTo:+document.getElementById('r-send').value};
+    const r={...rules(),minRest:+document.getElementById('r-rest').value,maxConsec:+document.getElementById('r-consec').value,maxConsecEx:+document.getElementById('r-consecx').value,restPerWeek:+document.getElementById('r-rpw').value,restAfterNight:+document.getElementById('r-night').value,restBlock:+((document.getElementById('r-block')||{}).value??3),freeWeekends:+((document.getElementById('r-wkfree')||{}).value??1),noSingleDays:(document.getElementById('r-single')||{checked:true}).checked,sendTo:+document.getElementById('r-send').value,offerExpiryH:+((document.getElementById('r-exp')||{}).value??12)};
     run(()=>api('save_settings',{rules:r,shifts}),'Regole salvate')},
   addshift(v){modal(`<h3>Nuovo turno · ${h(dept(v).name)}</h3><div class="two"><label class="f">Sigla (1-2 lettere)<input id="s-code" maxlength="2" placeholder="Es. S"></label><label class="f">Nome<input id="s-name" placeholder="Es. Spezzato"></label>
     <label class="f">Inizio<input type="time" id="s-start" value="09:00"></label><label class="f">Fine<input type="time" id="s-end" value="17:00"></label><label class="f">Persone necessarie<input type="number" id="s-need" value="1" min="0"></label></div>`,
@@ -1019,6 +1026,7 @@ V.regole=()=>{const M=isMgr(),teams=editableTeams();
   <h3 style="margin-top:8px">Comodità dei turni</h3>
   <div class="two"><label class="f">Riposi di fila almeno una volta al mese<input type="number" id="r-block" min="0" max="7" value="${rules().restBlock??3}"></label><label class="f">Weekend liberi al mese (almeno)<input type="number" id="r-wkfree" min="0" max="2" value="${rules().freeWeekends??1}"></label></div>
   <div class="toggle"><input type="checkbox" id="r-single" ${rules().noSingleDays!==false?'checked':''}><label for="r-single">Niente giorni di lavoro isolati (salvo eventi)</label></div>
+  <label class="f">Ore per rispondere a una proposta di cambio (poi passa al responsabile)<input type="number" id="r-exp" min="1" max="72" value="${rules().offerExpiryH??12}"></label>
   <button class="primary" data-act="saverules">Salva le regole</button><p class="muted">Le nuove regole valgono per i prossimi turni generati e per i prossimi scambi.</p></div>
   <div class="card"><h3>Nuovo team</h3><div class="row"><input id="n-dep" class="grow" style="width:auto" placeholder="Es. Housekeeping"><button class="ghost" data-act="adddept">Aggiungi</button></div></div>`:''}`};
 
@@ -1226,7 +1234,8 @@ V.oggi=()=>{
   ${evs.length?`<div style="margin-bottom:10px">${evs.map(e=>`<span class="tag ev-${e.impact}">${h(e.name)}</span>`).join(' ')}</div>`:''}
   ${D.departments.map(dp=>{const sh=shiftsOf(dp.id),list=teamOnDay(dp.id,d);
     return`<div class="card"><h3>${h(dp.name)}</h3>${sh.map(s=>{const p=list.filter(x=>x.c===s.code);return`<div class="shiftblock"><span class="pill" style="background:${s.color}">${h(s.name)}</span> <small>${s.start_time}–${s.end_time} · ${p.length}</small>
-      <div class="who2">${p.map(x=>`<span class="person">${av(x.e.id)}${h(x.e.name)}${x.a&&x.a.skill?` <small>${h(x.a.skill)}</small>`:''}</span>`).join('')||'<small class="muted">Nessuno</small>'}</div></div>`}).join('')}</div>`}).join('')}`;
+      <div class="who2">${p.map(x=>`<span class="person">${av(x.e.id)}${h(x.e.name)}${x.a&&x.a.skill?` <small>${h(x.a.skill)}</small>`:''}${canEditTeam(dp.id)&&dateOf(d)>=addD(todayStr(),-1)?` <button class="link danger" style="padding:0 0 0 6px" data-act="absent" data-v="${x.e.id}|${d}">Assente</button>`:''}</span>`).join('')||'<small class="muted">Nessuno</small>'}</div></div>`}).join('')}
+      ${(()=>{const off=(D.leaves||[]).filter(l=>l.status==='approved'&&l.date_from<=dateOf(d)&&l.date_to>=dateOf(d)&&(mem(l.member_id)||{}).department_id===dp.id);return off.length?`<p class="muted" style="font-size:13px;margin:8px 0 0">Assenti: ${off.map(l=>`${h(name(l.member_id))} (${LVL[l.kind][1].toLowerCase()})`).join(', ')}</p>`:''})()}</div>`}).join('')}`;
 };
 
 /* ----- Calendario struttura (Property Calendar) ----- */
@@ -1407,6 +1416,73 @@ Object.assign(A,{
   undo(v){confirmBox('Annullare questa modifica? Le celle cambiate di nuovo dopo restano come sono.','Annulla modifica',async()=>{const r=await run(()=>api('undo_change',{batch:v}));if(r)toast(`Annullata: ${r.done} celle ripristinate${r.skipped?`, ${r.skipped} lasciate`:''}`)},true)},
 });
 </script>
+<script>
+/* ===== Scambi diretti, ferie con saldo, malattia improvvisa, opzioni pronte ===== */
+(function(){const st=document.createElement('style');st.textContent=`
+.grid td.c span em.lv{font-style:normal;font-size:10px;font-weight:700;color:var(--info);opacity:1}
+.grid td.c.R span:has(em.lv){opacity:1;background:var(--info-soft)}
+.bal{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:6px 0 12px}
+.bal div{background:var(--accent-soft);border-radius:14px;padding:10px 8px;text-align:center;font-size:12px;color:var(--muted)}
+.bal div b{display:block;font-size:22px;color:var(--text,inherit)}
+.lvrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line,rgba(0,0,0,.08))}
+.lvrow:last-child{border:0}.lvrow small{color:var(--muted)}
+.prio{display:inline-grid;place-items:center;min-width:24px;height:24px;border-radius:12px;background:var(--accent);color:#fff;font-size:12px;font-weight:700;margin-right:6px}
+.swopt{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:9px 0;border-bottom:1px solid var(--line,rgba(0,0,0,.08))}
+`;document.head.appendChild(st)})();
+SRC.ferie='Ferie approvate';
+const _navItems=navItems;
+navItems=function(){const it=_navItems(),i=it.findIndex(x=>x.id==='richiedi');const f={id:'ferie',mod:'Planning',label:'Ferie e permessi',key:'W',show:true};if(!it.some(x=>x.id==='ferie'))it.splice(i>=0?i+1:it.length,0,f);return it};
+const LST={pending:['In attesa','warn'],approved:['Approvate','ok'],rejected:['Non approvate','bad'],cancelled:['Annullate','']};
+const lvKind=k=>LVL[k]?LVL[k][1]:k;
+async function loadLeaves(force){const y=ui.lvYear||(+ui.month.slice(0,4));ui.lvYear=y;if(ui.lv&&ui.lv.year===y&&!force)return;ui.lv={year:y,loading:true};
+  try{ui.lv=await api('leaves_overview',{year:y});render()}catch(e){ui.lv={year:y,error:e.message};render()}}
+V.ferie=()=>{
+  loadLeaves();const L=ui.lv||{};
+  if(L.loading)return`<h2>Ferie e permessi</h2><div class="card empty">Carico…</div>`;
+  if(L.error)return`<h2>Ferie e permessi</h2><div class="card empty">${h(L.error)}</div>`;
+  const me=(L.people||[]).find(p=>p.id===D.me.id),y=L.year,today=todayStr();
+  const mine=(L.mine||[]).slice().sort((a,b)=>a.date_from<b.date_from?1:-1);
+  const myCard=D.me.department_id||!isMgr()?`<div class="card"><h3>Il mio saldo ${y}</h3>${me?`<div class="bal"><div><b>${me.entitled+me.carried}</b>spettanti</div><div><b>${me.used}</b>usati</div><div><b>${me.pending}</b>in attesa</div><div><b>${me.left}</b>restanti</div></div>`:''}
+    <div class="two"><label class="f">Tipo<select id="lv-kind"><option value="ferie">Ferie</option><option value="permesso">Permesso</option></select></label><label class="f">Nota (facoltativa)<input id="lv-note" maxlength="300" placeholder="Es. matrimonio di mia sorella"></label></div>
+    <div class="two"><label class="f">Dal<input type="date" id="lv-from" min="${today}"></label><label class="f">Al<input type="date" id="lv-to" min="${today}"></label></div>
+    <p class="muted" style="font-size:13px">Si contano i giorni esclusi domeniche e festivi. Le ferie estive (giugno–settembre) chiedile presto: a parità, passa prima chi l'anno scorso ne ha avute meno.</p>
+    <button class="primary" data-act="lvsend">Invia la richiesta</button>
+    ${mine.length?`<h3 style="margin-top:18px">Le mie richieste</h3>${mine.map(l=>`<div class="lvrow"><div><b>${lvKind(l.kind)}</b> ${fmtS(l.date_from)}${l.date_to!==l.date_from?' → '+fmtS(l.date_to):''}<br><small>${l.kind==='malattia'?'':l.days+' gg · '}${ago(l.created_at)}</small></div><div class="row"><span class="tag ${LST[l.status][1]}">${LST[l.status][0]}</span>${(l.status==='pending'||(l.status==='approved'&&l.date_from>today))&&l.kind!=='malattia'?`<button class="link danger" data-act="lvcancel" data-v="${l.id}">Annulla</button>`:''}</div></div>`).join('')}`:''}</div>`:'';
+  const dec=L.canDecide?`<div class="card"><h3>Da approvare</h3>${(L.pending||[]).length?L.pending.map(l=>`<div class="lvrow"><div><span class="prio" title="Priorità">${l.priority}</span><b>${h(l.name)}</b> · ${lvKind(l.kind)}<br><small>${fmtS(l.date_from)} → ${fmtS(l.date_to)} · ${l.days} gg · restano ${l.left}${l.summer?` · estate scorsa ${l.summerPrev} gg`:''}</small>${l.overlap?`<br><span class="tag warn">Negli stessi giorni ${l.overlap===1?'è via un altro collega':`sono via altri ${l.overlap}`}</span>`:''}${l.note?`<br><small>${h(l.note)}</small>`:''}</div>
+      <div class="row" style="flex-wrap:nowrap"><button class="ghost sm" data-act="lvno" data-v="${l.id}">No</button><button class="primary sm" data-act="lvok" data-v="${l.id}">Approva</button></div></div>`).join(''):'<div class="empty">Nessuna richiesta in attesa</div>'}</div>
+    <div class="card" style="overflow-x:auto"><h3>Saldi del team ${y}</h3><table class="rep"><thead><tr><th>Persona</th><th>Spettanti</th><th>Usati</th><th>In attesa</th><th>Restanti</th><th></th></tr></thead><tbody>
+    ${L.people.filter(p=>p.id!==D.me.id||isMgr()).map(p=>`<tr><td>${h(p.name)}</td><td>${p.entitled+p.carried}</td><td>${p.used}</td><td>${p.pending}</td><td class="${p.left<0?'bad':''}">${p.left}</td><td><button class="link" data-act="lvbal" data-v="${p.id}">Modifica</button></td></tr>`).join('')}</tbody></table></div>`:'';
+  return`<h2>Ferie e permessi</h2><div class="toolbar"><select id="lv-year" style="width:auto">${[y-1,y,y+1].map(k=>`<option ${k===y?'selected':''}>${k}</option>`).join('')}</select></div>${dec}${myCard}`;
+};
+document.addEventListener('change',e=>{if(e.target&&e.target.id==='lv-year'){ui.lvYear=+e.target.value;ui.lv=null;render()}});
+
+Object.assign(A,{
+  async swapopt(v){const d=+v;try{const r=await api('swap_options',{day:dateOf(d)});const my=seqOf(D.me.id)[d],sd=sdef(D.me.department_id,my);
+    if(!r.options.length)return modal(`<h3>Scambia ${fmt(d)}</h3><p class="muted">Nessuno scambio diretto possibile che rispetti riposi e regole. Puoi usare "Chiedi libero": provo anche le coperture.</p>`,`<button class="primary" data-act="mclose">Ok</button>`);
+    const by={};r.options.forEach(o=>(by[o.to]||(by[o.to]={name:o.name,list:[]})).list.push(o));
+    modal(`<h3>Scambia ${fmt(d)}</h3><p class="muted">Il tuo turno: ${h(sd?sd.name:my)}. Scegli con chi e in cambio di quale suo giorno: il collega deve accettare e poi serve l'ok del responsabile.</p>
+    ${Object.entries(by).map(([id,g])=>`<div class="menu-mod">${h(g.name)}</div>${g.list.slice(0,6).map(o=>`<div class="swopt"><span>Tu lavori il suo <b>${fmtS(o.day2)}</b> (${h((sdef(D.me.department_id,o.s2)||{}).name||o.s2)})</span><button class="primary sm" data-act="swapsend" data-v="${dateOf(d)}|${id}|${o.day2}">Proponi</button></div>`).join('')}`).join('')}`,
+    `<button class="ghost" data-act="mclose">Chiudi</button>`)}catch(e){toast(e.message)}},
+  async swapsend(v){const[day,to,day2]=v.split('|');closeModal();await run(()=>api('propose_swap',{day,to_member:to,day2}))},
+  forceoffer(v){const o=D.offers.find(x=>x.id===v);confirmBox(`Assegnare a ${h(name(o.to_member))} ${fmtS(o.day)}${o.type==='swap'?` (e lasciarlo libero ${fmtS(o.day2)})`:''}? Riceve subito una notifica.`,'Assegna',()=>run(()=>api('force_offer',{offer_id:v})))},
+  async lvsend(){const kind=document.getElementById('lv-kind').value,from=document.getElementById('lv-from').value,to=document.getElementById('lv-to').value||from,note=document.getElementById('lv-note').value.trim();
+    if(!from)return toast('Scegli le date');const r=await run(()=>api('request_leave',{kind,from,to,note}));if(r){ui.lv=null;render()}},
+  lvcancel(v){confirmBox('Annullare questa richiesta di ferie?','Annulla',async()=>{await run(()=>api('cancel_leave',{id:v}),'Annullata');ui.lv=null;render()},true)},
+  async lvok(v){const r=await run(()=>api('decide_leave',{id:v,approve:true}));ui.lv=null;render();if(r&&r.holes)setTimeout(()=>toast(r.message),1600)},
+  lvno(v){confirmBox('Non approvare questa richiesta?','Non approvare',async()=>{await run(()=>api('decide_leave',{id:v,approve:false}));ui.lv=null;render()},true)},
+  lvbal(v){const p=ui.lv.people.find(x=>x.id===v);modal(`<h3>Saldo ${ui.lv.year} · ${h(p.name)}</h3><div class="two"><label class="f">Giorni spettanti<input type="number" id="b-ent" min="0" max="99" step="0.5" value="${p.entitled}"></label><label class="f">Residuo anno prima<input type="number" id="b-car" min="0" max="99" step="0.5" value="${p.carried}"></label></div>`,
+    `<button class="ghost" data-act="mclose">Annulla</button><button class="primary" data-act="lvbalsave" data-v="${v}">Salva</button>`)},
+  async lvbalsave(v){const entitled=+document.getElementById('b-ent').value,carried=+document.getElementById('b-car').value;closeModal();await run(()=>api('set_balance',{member_id:v,year:ui.lv.year,entitled,carried}),'Saldo aggiornato');ui.lv=null;render()},
+  absentme(){const t=todayStr();modal(`<h3>Segnala un'assenza per malattia</h3><p class="muted">Avviso subito il responsabile e chiedo ai colleghi che possono coprire i tuoi turni: il primo che accetta li prende.</p>
+    <div class="two"><label class="f">Dal<input type="date" id="ab-from" value="${t}" min="${addD(t,-1)}"></label><label class="f">Al (compreso)<input type="date" id="ab-to" value="${t}" min="${t}"></label></div>`,
+    `<button class="ghost" data-act="mclose">Annulla</button><button class="primary" style="background:#B91C1C" data-act="absentgo">Segnala</button>`)},
+  async absentgo(v){const from=document.getElementById('ab-from').value,to=document.getElementById('ab-to').value||from;closeModal();await run(()=>api('report_absence',{member_id:v||undefined,from,to}))},
+  absent(v){const[id,d]=v.split('|');const ds=dateOf(+d);modal(`<h3>${h(name(id))} assente</h3><p class="muted">Segno la malattia e chiedo subito ai colleghi liberi, ordinati per chi può davvero coprire.</p>
+    <div class="two"><label class="f">Dal<input type="date" id="ab-from" value="${ds}"></label><label class="f">Al (compreso)<input type="date" id="ab-to" value="${ds}" min="${ds}"></label></div>`,
+    `<button class="ghost" data-act="mclose">Annulla</button><button class="primary" style="background:#B91C1C" data-act="absentgo" data-v="${id}">Segnala</button>`)},
+});
+</script>
+
 
 </body>
 </html>

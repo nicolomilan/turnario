@@ -1,6 +1,6 @@
 // Turnario API — tutte le scritture passano da qui (il client ha solo lettura via RLS).
 import { createClient } from 'npm:@supabase/supabase-js@2';
-import { findOffers, offerValid, CTX_DAYS, planVariants, planMetrics, holidaysOfMonth, italianHolidays, nightCodes } from './logic.js';
+import { findOffers, offerValid, swapOptions, CTX_DAYS, planVariants, planMetrics, holidaysOfMonth, italianHolidays, nightCodes, targetDays } from './logic.js';
 
 const URL_ = Deno.env.get('SUPABASE_URL')!;
 const SERVICE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -26,6 +26,19 @@ const daysIn = (m: string) => { const [y, mo] = m.split('-').map(Number); return
 const dateOf = (m: string, d: number) => `${m}-${pad(d + 1)}`;
 const idxOf = (date: string) => Number(date.slice(8, 10)) - 1;
 const addDays = (date: string, k: number) => { const t = new Date(date + 'T12:00:00Z'); t.setUTCDate(t.getUTCDate() + k); return t.toISOString().slice(0, 10); };
+// giorni approvati di ferie/permesso/malattia → { 'member|YYYY-MM-DD': kind }
+async function leaveDays(b: string, from: string, to: string) {
+  const rows = await q(db.from('leaves').select('member_id,kind,date_from,date_to').eq('business_id', b).eq('status', 'approved').lte('date_from', to).gte('date_to', from)) as any[];
+  const out = new Map<string, string>();
+  for (const l of rows) for (let d = l.date_from < from ? from : l.date_from; d <= l.date_to && d <= to; d = addDays(d, 1)) out.set(`${l.member_id}|${d}`, l.kind);
+  return out;
+}
+// giorni di ferie che si scalano dal saldo: esclusi domeniche e festivi
+function leaveCount(from: string, to: string) {
+  let k = 0;
+  for (let d = from; d <= to; d = addDays(d, 1)) { const wd = new Date(d + 'T12:00:00Z').getUTCDay(); if (wd !== 0 && !italianHolidays(Number(d.slice(0, 4)))[d.slice(5)]) k++; }
+  return k;
+}
 // Codici dei giorni [from..to] per ogni persona (R se nessun turno): serve a collegare i mesi.
 async function ctxDays(b: string, from: string, to: string, ids: string[]) {
   const rows = await q(db.from('assignments').select('member_id,day,code').eq('business_id', b).gte('day', from).lte('day', to)) as any[];
@@ -96,6 +109,8 @@ async function loadMonth(b: string, month: string) {
   (members as Member[]).forEach((m) => (seqs[m.id] = Array(n).fill('R')));
   (asg as any[]).forEach((a) => { if (seqs[a.member_id]) seqs[a.member_id][idxOf(a.day)] = a.code; });
   const lockSet = new Set((locks as any[]).map((l) => `${l.member_id}|${idxOf(l.day)}`));
+  // chi è in ferie o malattia non può coprire né essere spostato in quei giorni
+  (await leaveDays(b, dateOf(month, 0), dateOf(month, n - 1))).forEach((_k, key) => { const [id, d] = key.split('|'); lockSet.add(`${id}|${idxOf(d)}`); });
   const byId = new Map((members as Member[]).map((m) => [m.id, m]));
   const ids = (members as Member[]).map((m) => m.id);
   const first0 = dateOf(month, 0), last0 = dateOf(month, n - 1);
@@ -139,9 +154,10 @@ const shiftName = (c: Ctx, deptId: string | null, code: string) => c.shifts.find
 async function sendOffers(c: Ctx, req: any, day: any, offs: any[]) {
   if (!offs.length) return;
   const A = c.byId.get(req.member_id)!;
-  const rows = offs.map((o) => ({
+  const rows = offs.map((o, i) => ({
     business_id: req.business_id, request_id: req.id, request_day_id: day.id, from_member: req.member_id, to_member: o.to,
     day: day.day, shift_code: day.shift_code, type: o.type, day2: o.type === 'swap' ? dateOf(c.month, o.d2) : null, shift2_code: o.s2 || null,
+    rank: (day.asked || []).length + i + 1, score: o.score ?? null,
   }));
   await q(db.from('offers').insert(rows));
   day.asked = [...(day.asked || []), ...offs.map((o) => o.to)];
@@ -149,7 +165,10 @@ async function sendOffers(c: Ctx, req: any, day: any, offs: any[]) {
   for (const o of offs) {
     const B = c.byId.get(o.to);
     const extra = o.type === 'swap' ? ` In cambio saresti libero/a ${fmt(dateOf(c.month, o.d2))}.` : ' È una copertura senza scambio.';
-    await notify(B, `${A.name} ti chiede un cambio: lavoreresti ${fmt(day.day)} (${shiftName(c, A.department_id, day.shift_code)}).${extra} Il primo collega che accetta ottiene il cambio.`, `Turnario: ${first(A)} ti chiede un cambio per ${fmt(day.day)}`);
+    const sn = shiftName(c, A.department_id, day.shift_code);
+    if (req.kind === 'malattia') await notify(B, `Urgente: ${A.name} è assente per malattia. Puoi coprire ${fmt(day.day)} (${sn})?${extra} Il primo che accetta prende il turno.`, `Turnario: urgente, serve una copertura ${fmt(day.day)}`);
+    else if (req.kind === 'scambio') await notify(B, `${A.name} ti propone uno scambio: tu lavori ${fmt(day.day)} (${sn}), lui/lei lavora il tuo ${fmt(dateOf(c.month, o.d2))}. Serve poi l'ok del responsabile.`, `Turnario: ${first(A)} ti propone uno scambio`);
+    else await notify(B, `${A.name} ti chiede un cambio: lavoreresti ${fmt(day.day)} (${sn}).${extra} Il primo collega che accetta ottiene il cambio.`, `Turnario: ${first(A)} ti chiede un cambio per ${fmt(day.day)}`);
   }
 }
 
@@ -160,6 +179,11 @@ async function afterOfferClosed(c: Ctx, dayId: string) {
   if (pend.length) return;
   const req = await q(db.from('requests').select('*').eq('id', day.request_id).single()) as any;
   const A = c.byId.get(req.member_id)!;
+  if (req.kind === 'scambio') {
+    await q(db.from('request_days').update({ status: 'cancelled' }).eq('id', dayId));
+    await notify(A, `Lo scambio proposto per ${fmt(day.day)} non è andato in porto.`);
+    return;
+  }
   const ex = rangeIdx(req.date_from, req.date_to);
   const offs = findOffers(deptCtx(c, A.department_id), A.id, idxOf(day.day), ex, day.asked || []).slice(0, c.rules.sendTo);
   if (offs.length) {
@@ -416,6 +440,10 @@ H.generate = async (me, p) => {
   members.forEach((m: any) => { cur[m.id] = Array(n).fill('R'); curSk[m.id] = Array(n).fill(null); });
   asg.forEach((a: any) => { if (cur[a.member_id]) { cur[a.member_id][idxOf(a.day)] = a.code; curSk[a.member_id][idxOf(a.day)] = a.skill; } });
   const lockSet = new Set([...locks, ...reqLocks].map((l: any) => `${l.member_id}|${idxOf(l.day)}`));
+  // ferie e malattie approvate: riposo fisso e monte giorni ridotto in proporzione
+  const lv = await leaveDays(b, first0, last0), leaveBy: Record<string, number> = {};
+  lv.forEach((_k, key) => { const [id] = key.split('|'); leaveBy[id] = (leaveBy[id] || 0) + 1; });
+  const T0 = targetDays(n, biz.rules), targetAdj = Object.fromEntries(Object.entries(leaveBy).map(([id, k]) => [id, Math.round((k * T0) / n)]));
   const pre = await ctxDays(b, addDays(first0, -CTX_DAYS), addDays(first0, -1), members.map((m: any) => m.id));
   const history = await historyFor(b, month, members, shifts);
   const variants: any[] = [];
@@ -433,12 +461,13 @@ H.generate = async (me, p) => {
     for (const id of ids) {
       fixed[id] = {};
       for (let d = 0; d < n; d++) {
+        if (lv.has(`${id}|${dateOf(month, d)}`) && d >= fromIdx) { fixed[id][d] = { code: 'R', skill: null }; continue; }
         const isLocked = lockSet.has(`${id}|${d}`);
         if (isLocked || d < fromIdx || (onlyIds && !onlyIds.includes(id))) { fixed[id][d] = { code: cur[id][d], skill: curSk[id][d] }; if (isLocked && d >= fromIdx) locked++; }
       }
     }
     const current = asg.length ? Object.fromEntries(ids.map((id: string) => [id, cur[id]])) : null;
-    const V = planVariants({ shifts: sh, memberIds: ids, n, rules: biz.rules, seedBase: y * 12 + mo + Math.floor(Math.random() * 1000), pre, skills, needs, memberRules, dow, dayAdjust, fixed, history, holidays, current }, 30);
+    const V = planVariants({ shifts: sh, memberIds: ids, n, rules: biz.rules, seedBase: y * 12 + mo + Math.floor(Math.random() * 1000), pre, skills, needs, memberRules, dow, dayAdjust, fixed, history, holidays, current, targetAdj }, 30);
     V.forEach((v: any, k: number) => {
       const t = variants[k] ||= { key: v.key, label: v.label, hint: v.hint, metrics: null, rows: [] };
       const m = planMetrics(v.result, ids, sh, dow, holidays, history);
@@ -474,13 +503,14 @@ H.apply_plan = async (me, p) => {
     q(db.from('request_days').select('member_id,day').eq('business_id', b).in('status', ['approved', 'awaiting_manager']).gte('day', fromDay).lte('day', last0)),
   ]) as any[];
   const lockSet = new Set([...locks, ...reqLocks].map((l: any) => `${l.member_id}|${l.day}`));
+  const lvA = await leaveDays(b, fromDay, last0);
   const cur = new Map(asg.map((a: any) => [`${a.member_id}|${a.day}`, a]));
   const want = new Map<string, any>();
   for (const [id, d, c, sk] of v.rows) if (d >= from && ids.includes(id)) want.set(`${id}|${dateOf(month, d)}`, { code: c, skill: sk });
   const batch = crypto.randomUUID(), logs: any[] = [], ups: any[] = [], dels: Record<string, string[]> = {}, touched: Record<string, number> = {};
   for (const id of ids) for (let d = from; d < n; d++) {
     const day = dateOf(month, d), key = `${id}|${day}`;
-    if (lockSet.has(key)) continue;
+    if (lockSet.has(key) || (lvA.has(key) && !cur.get(key))) continue;
     const o = cur.get(key) as any, w = want.get(key);
     const oc = o?.code || 'R', nc = w?.code || 'R';
     if (oc === nc && (nc === 'R' || (o?.skill ?? null) === (w?.skill ?? null))) continue;
@@ -616,7 +646,7 @@ H.save_settings = async (me, p) => {
   const r = p.rules || {};
   const int = (v: any, lo: number, hi: number, d: number) => { const x = Math.round(Number(v)); return Number.isFinite(x) ? Math.min(hi, Math.max(lo, x)) : d; };
   const maxConsec = int(r.maxConsec, 1, 14, 5);
-  const rules = { maxConsec, maxConsecEx: int(r.maxConsecEx ?? maxConsec + 1, maxConsec, 14, maxConsec + 1), minRest: int(r.minRest, 0, 24, 11), restPerWeek: int(r.restPerWeek, 0, 4, 2), restAfterNight: int(r.restAfterNight ?? 2, 0, 4, 2), restBlock: int(r.restBlock ?? 3, 0, 7, 3), freeWeekends: int(r.freeWeekends ?? 1, 0, 2, 1), noSingleDays: r.noSingleDays !== false, sendTo: int(r.sendTo, 1, 10, 3), managerApproval: !!r.managerApproval };
+  const rules = { maxConsec, maxConsecEx: int(r.maxConsecEx ?? maxConsec + 1, maxConsec, 14, maxConsec + 1), minRest: int(r.minRest, 0, 24, 11), restPerWeek: int(r.restPerWeek, 0, 4, 2), restAfterNight: int(r.restAfterNight ?? 2, 0, 4, 2), restBlock: int(r.restBlock ?? 3, 0, 7, 3), freeWeekends: int(r.freeWeekends ?? 1, 0, 2, 1), noSingleDays: r.noSingleDays !== false, sendTo: int(r.sendTo, 1, 10, 3), managerApproval: !!r.managerApproval, offerExpiryH: int(r.offerExpiryH ?? 12, 1, 72, 12), leaveDays: int(r.leaveDays ?? 26, 0, 60, 26) };
   await q(db.from('businesses').update({ rules, ...(p.name ? { name: String(p.name).trim() } : {}) }).eq('id', me.business_id));
   for (const s of p.shifts || []) {
     const t = /^\d\d:\d\d$/;
@@ -717,7 +747,9 @@ H.accept_offer = async (me, p) => {
     await q(db.from('offers').update({ status: 'accepted' }).eq('id', o.id));
     const others = await q(db.from('offers').update({ status: 'superseded' }).eq('request_day_id', o.request_day_id).eq('status', 'pending').select()) as any[];
     for (const x of others) await notify(c.byId.get(x.to_member), `La richiesta di ${first(A)} per ${fmt(o.day)} è già stata coperta da ${first(me)}.`);
-    if (c.rules.managerApproval) {
+    const rq = (await q(db.from('requests').select('kind').eq('id', o.request_id)) as any[])[0] || {};
+    // scambio diretto: sempre con l'ok del responsabile; malattia: niente attese
+    if (rq.kind === 'scambio' || (c.rules.managerApproval && rq.kind !== 'malattia')) {
       await q(db.from('request_days').update({ status: 'awaiting_manager' }).eq('id', o.request_day_id));
       await notify(A, `${first(me)} ha accettato per ${fmt(o.day)}. Manca l'approvazione del responsabile.`, `Turnario: ${first(me)} ha accettato il cambio`);
       for (const m of managersFor(c, o.from_member)) await notify(m, `Da approvare: ${me.name} copre ${A?.name} ${fmt(o.day)}.`, 'Turnario: un cambio turno da approvare');
@@ -808,6 +840,183 @@ H.handled_day = async (me, p) => {
   await q(db.from('request_days').update({ status: 'handled' }).eq('id', p.request_day_id));
   return { ok: true };
 };
+/* ---------- Scambio diretto tra colleghi ---------- */
+H.swap_options = async (me, p) => {
+  needMember(me);
+  if (!isDate(p.day)) fail(400, 'Data non valida.');
+  const c = await loadMonth(me.business_id, monthOf(p.day));
+  const opts = swapOptions(deptCtx(c, me.department_id), me.id, idxOf(p.day));
+  return { options: opts.map((o) => ({ to: o.to, name: c.byId.get(o.to)?.name, day2: dateOf(c.month, o.d2), s2: o.s2 })) };
+};
+H.propose_swap = async (me, p) => {
+  needMember(me);
+  if (!isDate(p.day) || !isDate(p.day2) || monthOf(p.day) !== monthOf(p.day2)) fail(400, 'Le due date devono essere nello stesso mese.');
+  if (p.day < new Date().toISOString().slice(0, 10)) fail(400, 'Non puoi scambiare giorni già passati.');
+  const c = await loadMonth(me.business_id, monthOf(p.day));
+  const B = c.byId.get(p.to_member);
+  if (!B || !B.active || B.department_id !== me.department_id) fail(400, 'Collega non valido.');
+  const d = idxOf(p.day), d2 = idxOf(p.day2), code = c.seqs[me.id][d], s2 = c.seqs[B.id][d2];
+  const o = { from: me.id, to: B.id, d, shift: code, type: 'swap', d2, s2 };
+  if (!offerValid(deptCtx(c, me.department_id), o)) fail(409, 'Questo scambio non rispetta le regole dei turni.');
+  const open = await q(db.from('request_days').select('day').eq('member_id', me.id).eq('day', p.day).in('status', ['pending', 'claiming', 'awaiting_manager'])) as any[];
+  if (open.length) fail(409, `Hai già una richiesta in corso per ${fmt(p.day)}.`);
+  const req = await q(db.from('requests').insert({ business_id: me.business_id, member_id: me.id, date_from: p.day, date_to: p.day, kind: 'scambio', note: String(p.note || '').slice(0, 200) || null }).select().single()) as any;
+  const day = await q(db.from('request_days').insert({ business_id: me.business_id, request_id: req.id, member_id: me.id, day: p.day, shift_code: code, status: 'pending' }).select().single()) as any;
+  await sendOffers(c, req, day, [{ to: B.id, type: 'swap', d2, s2, score: 0 }]);
+  await log(me.business_id, `${me.name} propone a ${B.name} uno scambio: ${fmt(p.day)} ↔ ${fmt(p.day2)}.`);
+  return { ok: true, message: `Proposta inviata a ${first(B)}.` };
+};
+// il responsabile assegna direttamente una delle opzioni pronte (dopo una scadenza o un rifiuto)
+H.force_offer = async (me, p) => {
+  needMember(me);
+  const o = (await q(db.from('offers').select('*').eq('id', p.offer_id).eq('business_id', me.business_id)) as any[])[0];
+  if (!o) fail(404, 'Opzione non trovata.');
+  const day = await dayForManager(me, o.request_day_id);
+  if (!['failed', 'pending'].includes(day.status)) fail(409, 'Richiesta già gestita.');
+  const c = await loadMonth(me.business_id, monthOf(o.day));
+  if (!offerValid(deptCtx(c, c.byId.get(o.from_member)!.department_id), toLogicOffer(o))) fail(409, 'Questa opzione non è più valida con i turni attuali.');
+  await applyOffer(c, o);
+  await q(db.from('offers').update({ status: 'accepted' }).eq('id', o.id));
+  await q(db.from('offers').update({ status: 'superseded' }).eq('request_day_id', o.request_day_id).eq('status', 'pending'));
+  await q(db.from('request_days').update({ status: 'approved', covered_by: o.to_member }).eq('id', day.id));
+  await notify(c.byId.get(o.from_member), `Il responsabile ha sistemato ${fmt(o.day)}: sei libero/a.`, `Turnario: ${fmt(o.day)} sistemato`);
+  await notify(c.byId.get(o.to_member), `Il responsabile ti ha assegnato ${fmt(o.day)} (${shiftName(c, c.byId.get(o.from_member)!.department_id, o.shift_code)})${o.type === 'swap' ? ` e sei libero/a ${fmt(o.day2)}` : ''}.`, `Turnario: turno assegnato ${fmt(o.day)}`);
+  return { ok: true, message: 'Assegnato, turni aggiornati.' };
+};
+
+/* ---------- Ferie, permessi e malattia ---------- */
+async function approversOf(me: Member) {
+  const dp = me.department_id ? (await q(db.from('departments').select('*').eq('id', me.department_id)) as any[])[0] : null;
+  const ids = [dp?.scheduler_id, dp?.deputy_id].filter((x) => x && x !== me.id);
+  const list = ids.length ? await q(db.from('members').select('*').in('id', ids).eq('active', true)) as Member[] : [];
+  return list.length ? list : await q(db.from('members').select('*').eq('business_id', me.business_id).eq('role', 'manager').eq('active', true).neq('id', me.id)) as Member[];
+}
+const LK: Record<string, string> = { ferie: 'ferie', permesso: 'permesso', malattia: 'malattia' };
+H.request_leave = async (me, p) => {
+  needMember(me);
+  const kind = p.kind === 'permesso' ? 'permesso' : 'ferie';
+  if (!isDate(p.from) || !isDate(p.to) || p.to < p.from) fail(400, 'Date non valide.');
+  if (p.from < new Date().toISOString().slice(0, 10)) fail(400, 'Non puoi chiedere giorni già passati.');
+  if ((Date.parse(p.to) - Date.parse(p.from)) / 864e5 > 31) fail(400, 'Massimo 31 giorni per richiesta.');
+  const clash = await q(db.from('leaves').select('id').eq('member_id', me.id).in('status', ['pending', 'approved']).lte('date_from', p.to).gte('date_to', p.from)) as any[];
+  if (clash.length) fail(409, 'Hai già ferie o una richiesta in quei giorni.');
+  const days = leaveCount(p.from, p.to);
+  await q(db.from('leaves').insert({ business_id: me.business_id, member_id: me.id, kind, date_from: p.from, date_to: p.to, days, note: String(p.note || '').slice(0, 300) || null }));
+  for (const a of await approversOf(me)) await notify(a, `${me.name} chiede ${LK[kind]} dal ${fmt(p.from)} al ${fmt(p.to)} (${days} gg).`, `Turnario: richiesta di ${LK[kind]} da ${first(me)}`);
+  await log(me.business_id, `${me.name} ha chiesto ${LK[kind]} dal ${fmt(p.from)} al ${fmt(p.to)}.`);
+  return { ok: true, message: `Richiesta inviata (${days} giorni).` };
+};
+H.cancel_leave = async (me, p) => {
+  needMember(me);
+  const l = (await q(db.from('leaves').select('*').eq('id', p.id).eq('member_id', me.id)) as any[])[0];
+  if (!l || !['pending', 'approved'].includes(l.status)) fail(404, 'Richiesta non trovata.');
+  if (l.status === 'approved' && l.date_from <= new Date().toISOString().slice(0, 10)) fail(400, 'Le ferie sono già iniziate: chiedi al responsabile.');
+  await q(db.from('leaves').update({ status: 'cancelled' }).eq('id', l.id));
+  if (l.status === 'approved') for (const a of await approversOf(me)) await notify(a, `${me.name} ha annullato ${LK[l.kind]} dal ${fmt(l.date_from)} al ${fmt(l.date_to)}: puoi rigenerare quei giorni.`);
+  return { ok: true };
+};
+H.decide_leave = async (me, p) => {
+  needMember(me);
+  const l = (await q(db.from('leaves').select('*').eq('id', p.id).eq('business_id', me.business_id)) as any[])[0];
+  if (!l || l.status !== 'pending') fail(409, 'Richiesta già gestita.');
+  const m = await q(db.from('members').select('*').eq('id', l.member_id).single()) as Member;
+  await needTeamEditor(me, m.department_id);
+  if (m.id === me.id && me.role !== 'manager') fail(403, 'Le tue ferie le approva la direzione.');
+  const ok = !!p.approve;
+  await q(db.from('leaves').update({ status: ok ? 'approved' : 'rejected', decided_by: me.id, decided_at: new Date().toISOString() }).eq('id', l.id));
+  let holes = 0;
+  if (ok) {
+    // i turni già messi in quei giorni diventano riposo: restano da coprire
+    const asg = await q(db.from('assignments').select('day,code').eq('member_id', m.id).gte('day', l.date_from).lte('day', l.date_to)) as any[];
+    const batch = crypto.randomUUID();
+    for (const a of asg) { await setCode(me.business_id, m.id, a.day, 'R', null, { actor: me.id, source: 'ferie', batch }); holes++; }
+  }
+  await notify(m, ok ? `Approvate: ${LK[l.kind]} dal ${fmt(l.date_from)} al ${fmt(l.date_to)}.` : `Non approvate: ${LK[l.kind]} dal ${fmt(l.date_from)} al ${fmt(l.date_to)}.`, `Turnario: ${LK[l.kind]} ${ok ? 'approvate' : 'non approvate'}`);
+  await log(me.business_id, `${me.name} ha ${ok ? 'approvato' : 'rifiutato'} ${LK[l.kind]} di ${m.name} (${fmt(l.date_from)} → ${fmt(l.date_to)}).`);
+  return { ok: true, holes, from: l.date_from, message: ok ? (holes ? `Approvate. ${holes} turni ora scoperti: rigenera dal ${fmt(l.date_from)}.` : 'Approvate.') : 'Rifiutate.' };
+};
+H.set_balance = async (me, p) => {
+  needMember(me);
+  const m = await q(db.from('members').select('*').eq('id', p.member_id).eq('business_id', me.business_id).single()) as Member;
+  await needTeamEditor(me, m.department_id);
+  const year = Math.round(Number(p.year)), num = (v: any, d: number) => { const x = Number(v); return Number.isFinite(x) ? Math.min(99, Math.max(0, Math.round(x * 2) / 2)) : d; };
+  if (!(year >= 2020 && year <= 2100)) fail(400, 'Anno non valido.');
+  await q(db.from('leave_balances').upsert({ member_id: m.id, business_id: me.business_id, year, entitled: num(p.entitled, 26), carried: num(p.carried, 0) }));
+  return { ok: true };
+};
+// Panoramica ferie: saldo per persona e richieste in coda ordinate per priorità (estate: chi ne ha avute meno l'anno prima)
+H.leaves_overview = async (me, p) => {
+  needMember(me);
+  const year = Math.round(Number(p.year)) || new Date().getFullYear();
+  const ds = await q(db.from('departments').select('*').eq('business_id', me.business_id)) as any[];
+  const mine = ds.filter((d: any) => me.role === 'manager' || schedulesDept(me, d)).map((d: any) => d.id);
+  const ms = (await q(db.from('members').select('id,name,department_id').eq('business_id', me.business_id).eq('active', true)) as any[])
+    .filter((m: any) => m.id === me.id || mine.includes(m.department_id));
+  const ids = ms.map((m: any) => m.id);
+  const [bal, lv, lvPrev] = await Promise.all([
+    q(db.from('leave_balances').select('*').in('member_id', ids).eq('year', year)),
+    q(db.from('leaves').select('*').in('member_id', ids).lte('date_from', `${year}-12-31`).gte('date_to', `${year}-01-01`).order('created_at')),
+    q(db.from('leaves').select('member_id,date_from,date_to,kind').in('member_id', ids).eq('status', 'approved').eq('kind', 'ferie').gte('date_from', `${year - 1}-06-01`).lte('date_from', `${year - 1}-09-30`)),
+  ]) as any[];
+  const summerPrev: Record<string, number> = {};
+  lvPrev.forEach((l: any) => (summerPrev[l.member_id] = (summerPrev[l.member_id] || 0) + leaveCount(l.date_from, l.date_to)));
+  const people = ms.map((m: any) => {
+    const b = bal.find((x: any) => x.member_id === m.id) || { entitled: 26, carried: 0 };
+    const mine2 = lv.filter((l: any) => l.member_id === m.id && l.kind === 'ferie');
+    const used = mine2.filter((l: any) => l.status === 'approved').reduce((a: number, l: any) => a + Number(l.days), 0);
+    const pend = mine2.filter((l: any) => l.status === 'pending').reduce((a: number, l: any) => a + Number(l.days), 0);
+    return { id: m.id, name: m.name, department_id: m.department_id, entitled: Number(b.entitled), carried: Number(b.carried), used, pending: pend, left: Number(b.entitled) + Number(b.carried) - used, summerPrev: summerPrev[m.id] || 0 };
+  });
+  const isSummer = (l: any) => Number(l.date_from.slice(5, 7)) >= 6 && Number(l.date_from.slice(5, 7)) <= 9;
+  const pending = lv.filter((l: any) => l.status === 'pending' && l.member_id !== me.id || (l.status === 'pending' && me.role === 'manager'))
+    .map((l: any) => {
+      const pm = people.find((x: any) => x.id === l.member_id)!;
+      // quante persone dello stesso team sono già via (o lo chiedono) negli stessi giorni
+      let overlap = 0;
+      for (let d = l.date_from; d <= l.date_to; d = addDays(d, 1)) {
+        const k = lv.filter((x: any) => x.id !== l.id && ['approved', 'pending'].includes(x.status) && x.date_from <= d && x.date_to >= d && people.find((y: any) => y.id === x.member_id)?.department_id === pm.department_id).length;
+        overlap = Math.max(overlap, k);
+      }
+      return { ...l, name: pm.name, overlap, summer: isSummer(l), summerPrev: pm.summerPrev, left: pm.left };
+    })
+    .sort((a: any, b: any) => (a.summer && b.summer ? a.summerPrev - b.summerPrev : 0) || a.created_at.localeCompare(b.created_at));
+  pending.forEach((l: any, i: number) => (l.priority = i + 1));
+  return { year, people, pending, mine: lv.filter((l: any) => l.member_id === me.id), canDecide: mine.length > 0 };
+};
+// Malattia improvvisa: segna l'assenza e chiede subito ai colleghi che possono davvero coprire
+H.report_absence = async (me, p) => {
+  needMember(me);
+  const target = p.member_id && p.member_id !== me.id ? await q(db.from('members').select('*').eq('id', p.member_id).eq('business_id', me.business_id).single()) as Member : me;
+  if (target.id !== me.id) await needTeamEditor(me, target.department_id);
+  const today = new Date().toISOString().slice(0, 10);
+  const from = isDate(p.from) ? p.from : today, to = isDate(p.to) && p.to >= from ? p.to : from;
+  if (from < addDays(today, -1)) fail(400, 'Si può segnalare da ieri in poi.');
+  if ((Date.parse(to) - Date.parse(from)) / 864e5 > 13) fail(400, 'Massimo 14 giorni: poi usa le ferie o rigenera.');
+  const clash = await q(db.from('leaves').select('id').eq('member_id', target.id).eq('status', 'approved').lte('date_from', to).gte('date_to', from)) as any[];
+  if (clash.length) fail(409, 'In quei giorni risulta già un\'assenza.');
+  await q(db.from('leaves').insert({ business_id: me.business_id, member_id: target.id, kind: 'malattia', date_from: from, date_to: to, days: 0, status: 'approved', decided_by: me.id, decided_at: new Date().toISOString(), note: String(p.note || '').slice(0, 300) || null }));
+  let sent = 0, uncovered = 0;
+  // per ogni mese toccato: una richiesta urgente con le proposte ai colleghi
+  for (let m0 = monthOf(from); m0 <= monthOf(to); m0 = monthOf(addDays(dateOf(m0, daysIn(m0) - 1), 1))) {
+    const c = await loadMonth(me.business_id, m0);
+    const a = from > dateOf(m0, 0) ? from : dateOf(m0, 0), z = to < dateOf(m0, daysIn(m0) - 1) ? to : dateOf(m0, daysIn(m0) - 1);
+    const ex = rangeIdx(a, z), work = ex.filter((d) => c.seqs[target.id][d] !== 'R' && dateOf(m0, d) >= today);
+    if (!work.length) continue;
+    const req = await q(db.from('requests').insert({ business_id: me.business_id, member_id: target.id, date_from: a, date_to: z, kind: 'malattia', note: 'Malattia' }).select().single()) as any;
+    // la persona malata non va bloccata sui suoi stessi giorni da coprire
+    const dc = { ...deptCtx(c, target.department_id), locked: (id: string, d: number) => (id === target.id && ex.includes(d) ? false : c.locked(id, d)) };
+    for (const d of work) {
+      const day = await q(db.from('request_days').insert({ business_id: me.business_id, request_id: req.id, member_id: target.id, day: dateOf(m0, d), shift_code: c.seqs[target.id][d], status: 'pending' }).select().single()) as any;
+      const offs = findOffers(dc, target.id, d, ex).slice(0, Math.max(4, c.rules.sendTo * 2));
+      if (offs.length) { await sendOffers(c, req, day, offs); sent += offs.length; }
+      else { uncovered++; await q(db.from('request_days').update({ status: 'failed' }).eq('id', day.id)); }
+    }
+  }
+  for (const a of await approversOf(target)) if (a.id !== me.id) await notify(a, `${target.name} è assente per malattia dal ${fmt(from)}${to !== from ? ` al ${fmt(to)}` : ''}.${uncovered ? ` ${uncovered} turni senza colleghi disponibili: servono interventi.` : ''}`, `Turnario: assenza di ${first(target)}`);
+  await log(me.business_id, `Assenza per malattia: ${target.name} dal ${fmt(from)}${to !== from ? ` al ${fmt(to)}` : ''}.`);
+  return { ok: true, sent, uncovered, message: sent ? `Assenza registrata: chiesto a ${sent} colleghi.` : uncovered ? 'Assenza registrata: nessun collega disponibile, avvisato il responsabile.' : 'Assenza registrata.' };
+};
+
 H.calendar_link = async (me, p) => {
   needMember(me);
   if (p.reset) await q(db.from('calendar_tokens').delete().eq('member_id', me.id));

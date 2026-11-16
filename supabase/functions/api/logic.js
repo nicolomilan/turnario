@@ -164,12 +164,14 @@ export function comfortViolations(seq, rules, dow, pre = []) {
 // fixed: { id: { giorno: {code, skill} } } celle che non si toccano (bloccate, già passate, altre persone)
 // history: { id: {nights, weekends, holidays} } lavorati negli ultimi 12 mesi → equità nel tempo
 // holidays: giorni festivi del mese; current: turni attuali (per "meno cambi"); weights: {fair, comfort, stable}
-export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skills = {}, needs = [], memberRules = {}, dow = () => -1, dayAdjust = () => [], fixed = {}, history = {}, holidays = [], current = null, weights = {} }) {
+export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skills = {}, needs = [], memberRules = {}, dow = () => -1, dayAdjust = () => [], fixed = {}, history = {}, holidays = [], current = null, weights = {}, targetAdj = {} }) {
   const wf = weights.fair ?? 1, wc = weights.comfort ?? 1, ws = weights.stable ?? 0;
   const hol = new Set(holidays);
   const isWE = (md) => dow(md) === 0 || dow(md) === 6;
   const fx = (e, md) => (fixed[e] ? fixed[e][md] : undefined);
-  const R = rng(seed), T = targetDays(n, rules), emps = memberIds;
+  const R = rng(seed), T0 = targetDays(n, rules), emps = memberIds;
+  // monte giorni personale: chi è in ferie lavora proporzionalmente meno
+  const TT = Object.fromEntries(emps.map((e) => [e, Math.max(0, T0 - (targetAdj[e] || 0))]));
   const seq = {}, sk = {}, w = {}, consec = {}, cnt = {}, wkw = {};
   const P = CTX_DAYS; // i primi P giorni sono la coda del mese precedente
   emps.forEach((e) => {
@@ -237,12 +239,12 @@ export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skil
         // 4) ultima risorsa: si usa un riposo protetto piuttosto che lasciare il turno scoperto
         for (const [cap, extra, useProt] of [[rules.maxConsec, 0, false], [rules.maxConsec, 1, false], [exCap(rules), 1, false], [exCap(rules), 1, true]]) {
           for (const e of emps) {
-            if (used.has(e) || !has(e, sl.skill) || consec[e] >= cap || w[e] >= T + extra) continue;
+            if (used.has(e) || !has(e, sl.skill) || consec[e] >= cap || w[e] >= TT[e] + extra) continue;
             const prev = seq[e][d - 1], prev2 = seq[e][d - 2];
             if (prev !== 'R' && !gapOk(shifts, prev, sl.code, rules)) continue;
             if (kN > 0 && !nightRestOk(seq[e], d, sl.code, nights, kN)) continue;
             if (!hardOk(e, sl.code, md, useProt)) continue;
-            let s = (w[e] - (T * (md + 1)) / n) * 4 + (cnt[e][sl.code] - avg) * 1.5 + consec[e] * 0.4 + R() * 1.5;
+            let s = (w[e] - (TT[e] * (md + 1)) / n) * 4 + (cnt[e][sl.code] - avg) * 1.5 + consec[e] * 0.4 + R() * 1.5;
             if (prev === sl.code) s -= nights.has(sl.code) ? 9 : 4; // serie di notti più lunghe = meno riposi sprecati
             if (prev === 'R') s += prev2 !== 'R' ? 3 : -1;
             // comodità: chi ha appena iniziato una serie la continua (niente giorni isolati)
@@ -276,7 +278,7 @@ export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skil
       for (const f of emps) {
         if (f === e || seq[f][d] !== 'R' || !has(f, sk[e][md]) || prot[f].has(md) || fx(f, md)) continue;
         if (!(seq[f][d - 1] !== 'R' || (d + 1 < P + n && seq[f][d + 1] !== 'R'))) continue; // deve allungare una serie
-        if (w[f] >= T + 1) continue;
+        if (w[f] >= TT[f] + 1) continue;
         const save = [...seq[f]]; seq[f][d] = c;
         const ok = violations(seq[f], shifts, rules) <= violations(save, shifts, rules) && runLen(f, d) <= rules.maxConsec && hardOk(f, c, md)
           && ruleViolations(seq[f].slice(P), memberRules[f] || [], dow) === 0;
@@ -303,7 +305,7 @@ export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skil
   shifts.forEach((sh) => { fair += variance(emps.map((e) => cnt[e][sh.code] + (nights.has(sh.code) ? hv(e, 'nights') : 0))); });
   let base = 0;
   emps.forEach((e) => {
-    base += (w[e] - T) ** 2 * 5;
+    base += (w[e] - TT[e]) ** 2 * 5;
     for (let d = 1; d < n - 1; d++) if (seq[e][d] === 'R' && seq[e][d - 1] !== 'R' && seq[e][d + 1] !== 'R') base += 2;
   });
   const parts = { unc, exc, soft, iso, comfort, changes, fair, base };
@@ -417,6 +419,21 @@ export function findOffers(ctx, a, d, exDays = [], exEmps = []) {
     if (best) res.push({ to: b, ...best });
   }
   return res.sort((x, y) => x.score - y.score);
+}
+
+// Tutti gli scambi diretti possibili per il giorno d di a: con chi e in cambio di quale giorno
+export function swapOptions(ctx, a, d) {
+  const { seqs, colleagues, n, locked } = ctx, out = [];
+  const sa = seqs[a]; if (!sa || sa[d] === 'R') return out;
+  for (const b of colleagues) {
+    if (b === a || !seqs[b] || seqs[b][d] !== 'R') continue;
+    for (let d2 = 0; d2 < n; d2++) {
+      if (d2 === d || sa[d2] !== 'R' || seqs[b][d2] === 'R') continue;
+      const o = { from: a, to: b, d, shift: sa[d], type: 'swap', d2, s2: seqs[b][d2] };
+      if (offerValid(ctx, o)) out.push({ to: b, d2, s2: o.s2 });
+    }
+  }
+  return out;
 }
 
 // Verifica che uno scambio sia ancora applicabile sui turni attuali.
