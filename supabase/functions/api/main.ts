@@ -383,6 +383,13 @@ H.reset_password = async (me, p) => {
   return { ok: true, password: pw };
 };
 
+// regole di occupazione del team: [{min|max: %, shift_code, skill, delta}]
+function occAdjust(dp: any, rooms: number | undefined, total: number) {
+  if (rooms == null || !total) return [];
+  const pct = (rooms / total) * 100;
+  return (dp.occ_rules || []).filter((r: any) => (r.min != null && pct >= r.min) || (r.max != null && pct <= r.max))
+    .map((r: any) => ({ department_id: dp.id, shift_code: r.shift_code, skill: r.skill || null, delta: Number(r.delta) || 0 }));
+}
 // Turni lavorati negli ultimi 12 mesi (notti, weekend, festivi): servono all'equità nel tempo
 async function historyFor(b: string, month: string, members: any[], shifts: any[]) {
   const end = addDays(dateOf(month, 0), -1), [y, mo] = month.split('-').map(Number);
@@ -451,6 +458,9 @@ H.generate = async (me, p) => {
   const T0 = targetDays(n, biz.rules), targetAdj = Object.fromEntries(Object.entries(leaveBy).map(([id, k]) => [id, Math.round((k * T0) / n)]));
   const pre = await ctxDays(b, addDays(first0, -CTX_DAYS), addDays(first0, -1), members.map((m: any) => m.id));
   const history = await historyFor(b, month, members, shifts);
+  // occupazione prevista (dal PMS): sopra/sotto una soglia aggiunge o toglie persone
+  const occRows = await q(db.from('occupancy').select('day,rooms').eq('business_id', b).gte('day', first0).lte('day', last0)) as any[];
+  const occ = new Map(occRows.map((r: any) => [r.day, r.rooms])), totalRooms = Number(biz.rules?.totalRooms) || 0;
   const variants: any[] = [];
   let locked = 0;
   for (const dp of depts) {
@@ -460,7 +470,8 @@ H.generate = async (me, p) => {
     const needs = needsRows.filter((x: any) => sh.some((s: any) => s.id === x.shift_type_id)).map((x: any) => ({ ...x, shift_code: sh.find((s: any) => s.id === x.shift_type_id).code }));
     const skills = Object.fromEntries(members.map((m: any) => [m.id, m.skills || []]));
     const dayAdjust = (d: number) => { const day = dateOf(month, d);
-      return evRows.filter((e: any) => e.date_from <= day && e.date_to >= day).flatMap((e: any) => (e.adjustments || []).filter((a: any) => a.department_id === dp.id)); };
+      const ev = evRows.filter((e: any) => e.date_from <= day && e.date_to >= day).flatMap((e: any) => (e.adjustments || []).filter((a: any) => a.department_id === dp.id));
+      return ev.concat(occAdjust(dp, occ.get(day), totalRooms)); };
     // celle fisse: bloccate, prima del giorno scelto, persone escluse
     const fixed: Record<string, Record<number, any>> = {};
     for (const id of ids) {
@@ -845,6 +856,75 @@ H.handled_day = async (me, p) => {
   await q(db.from('request_days').update({ status: 'handled' }).eq('id', p.request_day_id));
   return { ok: true };
 };
+/* ---------- Occupazione prevista (importata dal PMS o scritta a mano) ---------- */
+H.save_occupancy = async (me, p) => {
+  needMember(me);
+  const ds = await q(db.from('departments').select('*').eq('business_id', me.business_id)) as any[];
+  if (!(me.role === 'manager' || ds.some((d: any) => schedulesDept(me, d)))) fail(403, 'Solo chi fa i turni può farlo.');
+  if (p.total_rooms != null) {
+    const t = Math.round(Number(p.total_rooms)); if (!(t >= 0 && t <= 5000)) fail(400, 'Numero di camere non valido.');
+    const biz = await q(db.from('businesses').select('rules').eq('id', me.business_id).single()) as any;
+    await q(db.from('businesses').update({ rules: { ...biz.rules, totalRooms: t } }).eq('id', me.business_id));
+  }
+  const rows = (Array.isArray(p.rows) ? p.rows : []).slice(0, 400).filter((r: any) => isDate(r.day) && Number.isFinite(Number(r.rooms)))
+    .map((r: any) => ({ business_id: me.business_id, day: r.day, rooms: Math.max(0, Math.min(5000, Math.round(Number(r.rooms)))) }));
+  if (rows.length) await q(db.from('occupancy').upsert(rows));
+  const del = (Array.isArray(p.clear) ? p.clear : []).filter(isDate);
+  if (del.length) await q(db.from('occupancy').delete().eq('business_id', me.business_id).in('day', del));
+  return { ok: true, saved: rows.length };
+};
+H.save_occ_rules = async (me, p) => {
+  const dp = await needTeamEditor(me, p.department_id);
+  const sh = await q(db.from('shift_types').select('code').eq('department_id', dp.id)) as any[];
+  const rules = (Array.isArray(p.rules) ? p.rules : []).slice(0, 8).map((r: any) => ({
+    min: r.min === '' || r.min == null ? null : Math.max(0, Math.min(100, Number(r.min))),
+    max: r.max === '' || r.max == null ? null : Math.max(0, Math.min(100, Number(r.max))),
+    shift_code: String(r.shift_code || ''), skill: r.skill ? String(r.skill).slice(0, 30) : null, delta: Math.max(-5, Math.min(5, Math.round(Number(r.delta) || 0))),
+  })).filter((r: any) => (r.min != null || r.max != null) && r.delta && sh.some((x: any) => x.code === r.shift_code));
+  await q(db.from('departments').update({ occ_rules: rules }).eq('id', dp.id));
+  return { ok: true };
+};
+
+/* ---------- Passaggio di consegne (come i Traces di OPERA) ---------- */
+H.add_shift_note = async (me, p) => {
+  needMember(me);
+  if (!isDate(p.day)) fail(400, 'Data non valida.');
+  const text = String(p.text || '').trim().slice(0, 1000); if (!text) fail(400, 'Scrivi la consegna.');
+  const dp = await deptRow(me, p.department_id); if (!dp) fail(400, 'Team non valido.');
+  if (!(me.department_id === dp.id || schedulesDept(me, dp) || me.role === 'manager')) fail(403, 'Non fai parte di questo team.');
+  await q(db.from('shift_notes').insert({ business_id: me.business_id, department_id: dp.id, day: p.day, shift_code: p.shift_code ? String(p.shift_code).slice(0, 2) : null, text, author: me.id }));
+  return { ok: true };
+};
+H.done_shift_note = async (me, p) => {
+  needMember(me);
+  const n = (await q(db.from('shift_notes').select('*').eq('id', p.id).eq('business_id', me.business_id)) as any[])[0];
+  if (!n) fail(404, 'Consegna non trovata.');
+  const dp = await deptRow(me, n.department_id);
+  if (!(me.department_id === n.department_id || schedulesDept(me, dp) || me.role === 'manager')) fail(403, 'Non fai parte di questo team.');
+  if (p.delete) { if (n.author !== me.id && !(schedulesDept(me, dp) || me.role === 'manager')) fail(403, 'Può cancellarla solo chi l\'ha scritta.'); await q(db.from('shift_notes').delete().eq('id', n.id)); return { ok: true }; }
+  const done = p.done !== false;
+  await q(db.from('shift_notes').update({ done, done_by: done ? me.id : null, done_at: done ? new Date().toISOString() : null }).eq('id', n.id));
+  return { ok: true };
+};
+
+/* ---------- Esportazione dei dati (backup) ---------- */
+H.export_data = async (me) => {
+  needManager(me);
+  const b = me.business_id, all = async (t: string, sel = '*') => {
+    const out: any[] = [];
+    for (let i = 0; ; i += 1000) { const part = await q(db.from(t).select(sel).eq('business_id', b).range(i, i + 999)) as any[]; out.push(...part); if (part.length < 1000) break; }
+    return out;
+  };
+  const [business] = await q(db.from('businesses').select('*').eq('id', b)) as any[];
+  const data: any = { exported_at: new Date().toISOString(), format: 'turnario-backup-1', business };
+  for (const t of ['departments', 'shift_types', 'shift_needs', 'events', 'occupancy', 'assignments', 'cell_locks', 'publications', 'leaves', 'leave_balances', 'requests', 'request_days', 'offers', 'preferences', 'member_rules', 'shift_notes', 'change_log', 'audit_log'])
+    data[t] = await all(t);
+  data.members = (await all('members')).map((m: any) => ({ ...m, user_id: m.user_id ? 'collegato' : null }));
+  await accessLog(me, 'export_data', null);
+  await log(b, `${me.name} ha esportato tutti i dati.`);
+  return data;
+};
+
 /* ---------- Scambio diretto tra colleghi ---------- */
 H.swap_options = async (me, p) => {
   needMember(me);

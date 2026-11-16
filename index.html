@@ -8,6 +8,9 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Turnario">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <title>Turnario — Turni per hotel e ristoranti</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
@@ -335,7 +338,7 @@ window.addEventListener('unhandledrejection',e=>{if(!BOOT.done)showFatal((e.reas
 setTimeout(()=>{if(!BOOT.done)showFatal('Il caricamento non si è completato. Controlla la connessione e riprova.')},15000);
 if(!window.supabase)throw new Error('Non riesco a caricare i componenti del sito. Controlla la connessione e riprova.');
 // lock disattivato: su Safari per iPhone il lock del browser a volte blocca l'accesso all'avvio
-const sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false,lock:async(_n,_t,fn)=>await fn()}});
+const sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false,lock:async(_n,_t,fn)=>await fn(),experimental:{passkey:true}}});
 
 const MESI=['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
 const GG=['Dom','Lun','Mar','Mer','Gio','Ven','Sab'];
@@ -443,7 +446,7 @@ async function loadAll(){
     const ms=months.map(x=>x.month.slice(0,7));
     if(!ui.month){const cur=todayStr().slice(0,7);ui.month=ms.includes(cur)?cur:(ms.find(m=>m>cur)||ms[ms.length-1]||(isMgrRole(me)?monthAdd(cur,1):cur))}
     const from=`${ui.month}-01`,to=`${ui.month}-${pad(new Date(+ui.month.slice(0,4),+ui.month.slice(5,7),0).getDate())}`;
-    const [assignments0,days,offers,notifs,log,events,pubs,locks,leaves]=await Promise.all([
+    const [assignments0,days,offers,notifs,log,events,pubs,locks,leaves,occ,snotes]=await Promise.all([
       sel(sb.from('assignments').select('member_id,day,code,skill').eq('business_id',b).gte('day',addD(from,-7)).lte('day',addD(to,7))),
       sel(sb.from('request_days').select('*').eq('business_id',b).gte('day',from).lte('day',to)),
       sel(sb.from('offers').select('*').eq('business_id',b).or(`and(day.gte.${from},day.lte.${to}),status.eq.pending`)),
@@ -452,10 +455,12 @@ async function loadAll(){
       sel(sb.from('events').select('*').eq('business_id',b).lte('date_from',to).gte('date_to',from).order('date_from')),
       sel(sb.from('publications').select('department_id,month').eq('business_id',b)),
       sel(sb.from('cell_locks').select('member_id,day').eq('business_id',b).gte('day',from).lte('day',to)),
-      sel(sb.from('leaves').select('*').eq('business_id',b).lte('date_from',to).gte('date_to',from))]);
+      sel(sb.from('leaves').select('*').eq('business_id',b).lte('date_from',to).gte('date_to',from)),
+      sel(sb.from('occupancy').select('day,rooms').eq('business_id',b).gte('day',from).lte('day',to)),
+      sel(sb.from('shift_notes').select('*').eq('business_id',b).gte('day',addD(from,-7)).lte('day',addD(to,7)).order('created_at',{ascending:false}))]);
     const reqIds=[...new Set(days.map(x=>x.request_id).concat(offers.map(o=>o.request_id)))];
     const requests=reqIds.length?await sel(sb.from('requests').select('*').in('id',reqIds).order('created_at',{ascending:false})):[];
-    D={me,business,departments,shifts,members,months:ms,assignments:assignments0,days,offers,notifs,log,requests,needs,events,pubs,leaves,locks:new Set(locks.map(l=>l.member_id+'|'+l.day))};
+    D={me,business,departments,shifts,members,months:ms,assignments:assignments0,days,offers,notifs,log,requests,needs,events,pubs,leaves,occ:new Map(occ.map(o=>[o.day,o.rooms])),snotes,locks:new Set(locks.map(l=>l.member_id+'|'+l.day))};
     // (serve per "Vedi come": il server già nasconde le bozze a chi non fa i turni)
     D.assignments=assignments0.filter(a=>{const m=mem(a.member_id);return !m||canEditTeam(m.department_id)||isPublished(m.department_id,a.day.slice(0,7))});
     if(ui.preview&&ui.preview.month!==ui.month)ui.preview=null;
@@ -529,8 +534,10 @@ function vLogin(){
   <label class="f">Email<input type="email" name="email" autocomplete="username" required></label>
   <label class="f">Password<input type="password" name="password" autocomplete="current-password" required></label>
   <button class="primary" style="width:100%">Accedi</button>
+  ${typeof sb.auth.signInWithPasskey==='function'&&window.PublicKeyCredential?`<button type="button" class="ghost" style="width:100%;margin-top:10px" data-act="passkeylogin">Accedi con Face ID</button>`:''}
   <p class="muted" style="text-align:center">Password dimenticata? Chiedi al tuo responsabile di reimpostarla.</p></form>
-  <div class="card" style="text-align:center"><b>Sei un responsabile?</b><p class="muted">Crea l'account della tua attività e aggiungi il personale.</p><button class="ghost" data-act="go" data-v="signup">Crea la tua attività</button></div></div>`;
+  <div class="card" style="text-align:center"><b>Sei un responsabile?</b><p class="muted">Crea l'account della tua attività e aggiungi il personale.</p><button class="ghost" data-act="go" data-v="signup">Crea la tua attività</button></div>
+  <p class="muted" style="text-align:center;font-size:13px"><a href="privacy.html">Informativa privacy</a></p></div>`;
 }
 function vSignup(){
   return`<div class="auth"><div class="hero">${LOGO.replace(/28/g,'72')}<h1>Turnario</h1><p>Crea la tua attività. Partirai con reparti e turni già pronti, che puoi modificare.</p></div>
@@ -650,7 +657,8 @@ function grid(depId,{editable=false,meId=null}={}){
   if(!emps.length)return'<div class="card empty">Nessuna persona in questo reparto.</div>';
   const evs=days.map(d=>eventsOn(dateOf(d)));
   const head=`<tr><th class="sticky">${h((dept(depId)||{}).name)}</th>${days.map(d=>`<th class="${isWe(d)?'we':''} ${isHol(d)?'hol':''}" ${isHol(d)?`title="${h(holidayName(dateOf(d)))}"`:''}>${GG[dow(d)][0]}<br>${d+1}</th>`).join('')}<th>Gg</th></tr>`
-    +(evs.some(x=>x.length)?`<tr class="evrow"><td class="sticky">Eventi</td>${evs.map((x,d)=>x.length?`<td class="ev-${x.some(e=>e.impact==='busy')?'busy':x.some(e=>e.impact==='quiet')?'quiet':'info'}" data-act="evday" data-v="${dateOf(d)}" title="${h(x.map(e=>e.name).join(', '))}"><span></span></td>`:'<td></td>').join('')}<td></td></tr>`:'');
+    +(evs.some(x=>x.length)?`<tr class="evrow"><td class="sticky">Eventi</td>${evs.map((x,d)=>x.length?`<td class="ev-${x.some(e=>e.impact==='busy')?'busy':x.some(e=>e.impact==='quiet')?'quiet':'info'}" data-act="evday" data-v="${dateOf(d)}" title="${h(x.map(e=>e.name).join(', '))}"><span></span></td>`:'<td></td>').join('')}<td></td></tr>`:'')
+    +(days.some(d=>occPct(d)!=null)?`<tr class="occrow"><td class="sticky">Occ. %</td>${days.map(d=>{const p=occPct(d);return`<td class="${p==null?'':p>=85?'hi':p<=40?'lo':''}">${p==null?'':p}</td>`}).join('')}<td></td></tr>`:'');
   const rows=emps.map(e=>{const seq=seqOf(e.id),vf=violFlagsCtx(e.id,depId),sf=softFlagsCtx(e.id);
     return`<tr class="${e.id===meId?'me':''}"><td class="sticky">${h(e.name)}</td>${seq.map((c,d)=>{const s=sdef(depId,c);
       return`<td class="c ${c==='R'?'R':''} ${editable?'edit':''} ${vf[d]?'viol':sf[d]?'exc':''} ${c==='R'&&isWe(d)?'we':''}" ${s?`style="--c:${s.color}"`:''} ${editable?`data-act="cell" data-v="${e.id}|${d}"`:''}><span>${c==='R'?(leaveOn(e.id,d)?`<em class="lv">${LVL[leaveOn(e.id,d).kind][0]}</em>`:'·'):h(c)}</span>${editable&&isLocked(e.id,d)?'<i class="lk"></i>':''}</td>`}).join('')}<td><b>${seq.filter(x=>x!=='R').length}</b></td></tr>`}).join('');
@@ -662,7 +670,9 @@ function grid(depId,{editable=false,meId=null}={}){
 const eventsOn=ds=>(D.events||[]).filter(e=>e.date_from<=ds&&e.date_to>=ds);
 function applyAdjust(slots,adj){const out=slots.map(x=>({...x}));for(const a of adj){const sl=out.find(x=>x.code===a.shift_code&&(x.skill||null)===(a.skill||null))||(!a.skill?out.find(x=>x.code===a.shift_code):null);
   if(sl)sl.need=Math.max(0,sl.need+a.delta);else if(a.delta>0)out.push({code:a.shift_code,skill:a.skill||null,need:a.delta})}return out.filter(x=>x.need>0)}
-function slotsForDay(depId,d){return applyAdjust(baseSlots(depId,d),eventsOn(dateOf(d)).flatMap(e=>(e.adjustments||[]).filter(a=>a.department_id===depId)))}
+function occPct(d){const r=D.occ&&D.occ.get(dateOf(d)),t=+(rules().totalRooms||0);return r==null||!t?null:Math.round(r/t*100)}
+function occAdj(depId,d){const p=occPct(d),dp=dept(depId);if(p==null||!dp)return[];return(dp.occ_rules||[]).filter(r=>(r.min!=null&&p>=r.min)||(r.max!=null&&p<=r.max)).map(r=>({department_id:depId,shift_code:r.shift_code,skill:r.skill||null,delta:+r.delta||0}))}
+function slotsForDay(depId,d){return applyAdjust(baseSlots(depId,d),eventsOn(dateOf(d)).flatMap(e=>(e.adjustments||[]).filter(a=>a.department_id===depId)).concat(occAdj(depId,d)))}
 function baseSlots(depId,d){const out=[],wd=dow(d);for(const sh of shiftsOf(depId)){const rows=D.needs.filter(x=>x.shift_type_id===sh.id);
   if(!rows.length){if(sh.need>0)out.push({code:sh.code,skill:null,need:sh.need});continue}
   const by={};rows.forEach(r=>{const k=r.skill||'';if(r.weekday===null&&!(k in by))by[k]=r.need});rows.forEach(r=>{if(r.weekday===wd)by[r.skill||'']=r.need});
@@ -1482,6 +1492,146 @@ Object.assign(A,{
     `<button class="ghost" data-act="mclose">Annulla</button><button class="primary" style="background:#B91C1C" data-act="absentgo" data-v="${id}">Segnala</button>`)},
 });
 </script>
+<script>
+/* ===== Occupazione dal PMS, consegne, stampa, app installabile e offline, Face ID, la mia settimana, backup ===== */
+(function(){const st=document.createElement('style');st.textContent=`
+.grid tr.occrow td{font-size:10px;color:var(--muted);text-align:center}
+.grid tr.occrow td.hi{color:var(--bad);font-weight:700}.grid tr.occrow td.lo{color:var(--info)}
+.sn{padding:10px 0;border-bottom:1px solid var(--line,rgba(0,0,0,.08))}.sn:last-child{border:0}
+.sn.done{opacity:.55}.sn.done p{text-decoration:line-through}
+.sn p{margin:4px 0 6px;white-space:pre-wrap}.sn small{color:var(--muted)}
+.wk7{display:grid;gap:8px}
+.wk7 .d{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--line,rgba(0,0,0,.08))}
+.wk7 .d:last-child{border:0}.wk7 .dd{min-width:44px;text-align:center}.wk7 .dd b{display:block;font-size:18px}.wk7 .dd small{color:var(--muted)}
+.wk7 .who{font-size:13px;color:var(--muted);margin-top:3px}
+.offbar{position:sticky;top:0;z-index:20;background:var(--warn-soft);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);padding:8px 14px;text-align:center;font-size:13px;border-radius:0 0 14px 14px}
+.occrules .row{gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0}.occrules input,.occrules select{width:auto;min-width:0}
+#print{display:none}
+@media print{
+  @page{size:A4 landscape;margin:8mm}
+  body>*:not(#print){display:none!important}
+  #print{display:block;font:9px/1.25 -apple-system,Helvetica,Arial,sans-serif;color:#000;background:#fff}
+  #print h1{font-size:14px;margin:0 0 2px}#print h2{font-size:11px;margin:10px 0 4px}
+  #print table{border-collapse:collapse;width:100%;table-layout:fixed;page-break-inside:avoid}
+  #print th,#print td{border:.5px solid #999;padding:1px 0;text-align:center;overflow:hidden}
+  #print th.n,#print td.n{width:16%;text-align:left;padding-left:3px;white-space:nowrap}
+  #print th.we{background:#eee}#print td.R{color:#999}
+  #print .leg{margin-top:4px}#print .leg span{margin-right:10px}
+}`;document.head.appendChild(st);
+  const pr=document.createElement('div');pr.id='print';document.body.appendChild(pr)})();
+
+/* --- 16. app installabile: service worker + lettura offline --- */
+if('serviceWorker' in navigator&&location.protocol==='https:')navigator.serviceWorker.register('sw.js').catch(()=>{});
+const SNAP='turnario:snap';
+const _loadAll=loadAll;
+loadAll=async function(){
+  try{await _loadAll();ui.offline=null;
+    if(D&&ui.view==='app'){try{localStorage.setItem(SNAP,JSON.stringify({at:Date.now(),uid:session&&session.user&&session.user.id,month:ui.month,D:{...D,locks:[...(D.locks||[])],occ:[...(D.occ||new Map())]}}))}catch(_){}}}
+  catch(e){
+    let snap=null;try{snap=JSON.parse(localStorage.getItem(SNAP)||'null')}catch(_){}
+    const net=!navigator.onLine||/fetch|network|Load failed|Failed to/i.test(String(e&&e.message||e));
+    if(net&&snap&&(!session||!session.user||snap.uid===session.user.id)){D={...snap.D,locks:new Set(snap.D.locks||[]),occ:new Map(snap.D.occ||[])};ui.month=snap.month;ui.view='app';ui.offline=snap.at;return}
+    throw e}
+};
+window.addEventListener('online',()=>{if(ui.offline&&session)loadAll().then(render).catch(()=>{})});
+const _renderOff=render;
+render=function(){_renderOff.apply(this,arguments);if(ui.offline&&ui.view==='app'){const a=document.getElementById('app')||document.body.firstElementChild;if(a&&!document.querySelector('.offbar')){const b=document.createElement('div');b.className='offbar';b.textContent=`Sei offline: turni salvati il ${new Date(ui.offline).toLocaleString('it-IT',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}. Le modifiche torneranno disponibili appena c'è rete.`;document.body.insertBefore(b,document.body.firstChild)}}else{const o=document.querySelector('.offbar');if(o)o.remove()}};
+const _apiOff=api;
+api=async function(action,payload){if(!navigator.onLine&&action!=='dev_status')throw new Error('Sei offline: riprova quando torna la rete.');return _apiOff(action,payload)};
+
+/* --- 18. la mia settimana --- */
+function myWeekCard(){
+  const me=D.me;if(!me.department_id||notGenerated())return'';const t=todayStr();if(t.slice(0,7)!==ui.month)return'';
+  const days=[...Array(7).keys()].map(k=>addD(t,k));
+  const codeOf=(id,ds)=>{const a=D.assignments.find(x=>x.member_id===id&&x.day===ds);return a?a.code:'R'};
+  const rows=days.map(ds=>{const c=codeOf(me.id,ds),s=sdef(me.department_id,c),lv=leaveOn(me.id,ds),hn=holidayName(ds);
+    const mates=c==='R'?[]:employees(me.department_id).filter(e=>e.id!==me.id&&codeOf(e.id,ds)===c).map(e=>e.name.split(' ')[0]);
+    const ev=(D.events||[]).filter(e=>e.date_from<=ds&&e.date_to>=ds);
+    return`<div class="d"><div class="dd"><small>${GG[dowOf(ds)]}</small><b>${+ds.slice(8)}</b></div><div class="grow">${s?`<span class="pill" style="background:${s.color}">${h(s.name)} ${s.start_time}–${s.end_time}</span>`:`<span class="tag">${lv?LVL[lv.kind][1]:'Riposo'}</span>`}${hn?` <span class="tag bad">${h(hn)}</span>`:''}${ev.map(e=>` <span class="tag ev-${e.impact}">${h(e.name)}</span>`).join('')}
+      ${mates.length?`<div class="who">Con te: ${h(mates.join(', '))}</div>`:c!=='R'?'<div class="who">Da solo/a in questo turno</div>':''}</div></div>`}).join('');
+  return`<div class="card"><h3>La mia settimana</h3><div class="wk7">${rows}</div></div>`;
+}
+const _dash=V.dashboard;
+V.dashboard=()=>{const html=_dash();return html.replace('<div class="tiles">',myWeekCard()+'<div class="tiles">')};
+
+/* --- 14. passaggio di consegne --- */
+function notesCard(d){
+  const ds=dateOf(d),teams=D.departments.filter(dp=>dp.id===D.me.department_id||canEditTeam(dp.id));if(!teams.length)return'';
+  const list=(D.snotes||[]).filter(n=>teams.some(t=>t.id===n.department_id)&&(n.day===ds||(n.day<ds&&!n.done&&n.day>=addD(ds,-7))));
+  const def=ui.snDept&&teams.some(t=>t.id===ui.snDept)?ui.snDept:(teams.find(t=>t.id===D.me.department_id)||teams[0]).id;
+  return`<div class="card"><h3>Consegne · ${fmt(d)}</h3>${list.length?list.map(n=>`<div class="sn ${n.done?'done':''}"><small><b>${h(name(n.author))}</b>${teams.length>1?' · '+h(dept(n.department_id).name):''}${n.shift_code?' · '+h((sdef(n.department_id,n.shift_code)||{}).name||n.shift_code):''}${n.day!==ds?` · dal ${fmtS(n.day)}`:''} · ${ago(n.created_at)}</small><p>${h(n.text)}</p>
+    <div class="row"><button class="ghost sm" data-act="sndone" data-v="${n.id}|${n.done?0:1}">${n.done?'Riapri':'Fatto ✓'}</button>${n.author===D.me.id||canEditTeam(n.department_id)?`<button class="link danger" data-act="sndel" data-v="${n.id}">Elimina</button>`:''}</div></div>`).join(''):'<div class="empty">Nessuna consegna per questo giorno</div>'}
+    <div style="margin-top:10px">${teams.length>1?`<label class="f">Team<select id="sn-dept">${teams.map(t=>`<option value="${t.id}" ${t.id===def?'selected':''}>${h(t.name)}</option>`).join('')}</select></label>`:''}
+    <div class="two"><label class="f">Per il turno<select id="sn-shift"><option value="">Tutti</option>${shiftsOf(def).map(s=>`<option value="${s.code}">${h(s.name)}</option>`).join('')}</select></label><label class="f">Giorno<input type="date" id="sn-day" value="${ds}"></label></div>
+    <label class="f">Consegna<textarea id="sn-text" rows="2" maxlength="1000" placeholder="Es. Camera 214 arriva tardi, lasciare la chiave in cassaforte"></textarea></label>
+    <button class="primary sm" data-act="snadd" data-v="${def}">Aggiungi consegna</button></div></div>`;
+}
+const _oggi=V.oggi;
+V.oggi=()=>{const html=_oggi();if(notGenerated())return html;return html+notesCard(ui.oggiD??Math.max(0,todayIdx()))};
+document.addEventListener('change',e=>{if(e.target&&e.target.id==='sn-dept'){ui.snDept=e.target.value;render()}});
+
+/* --- 13. occupazione e 15. stampa: tasti nel planning --- */
+const _turni=V.turni;
+V.turni=()=>_turni().replace('data-act="history">Storico</button>','data-act="history">Storico</button><button class="ghost sm" data-act="occ">Occupazione</button><button class="ghost sm" data-act="print">Stampa / PDF</button>');
+const _rep=V.reparto;
+V.reparto=()=>{const html=_rep();return notGenerated()?html:html.replace('</h2>','</h2><div class="toolbar"><button class="ghost sm" data-act="print">Stampa / PDF</button></div>')};
+function parseOcc(txt){
+  const out=[],[Y,M]=ui.month.split('-').map(Number),p2=x=>String(x).padStart(2,'0');
+  for(const line of String(txt).split(/\r?\n/)){const l=line.trim();if(!l)continue;let m,ds,rooms;
+    if((m=l.match(/^(\d{4})-(\d{2})-(\d{2})\D+(\d+)/)))ds=`${m[1]}-${m[2]}-${m[3]}`,rooms=+m[4];
+    else if((m=l.match(/^(\d{1,2})[\/.\-](\d{1,2})(?:[\/.\-](\d{2,4}))?\D+(\d+)/))){let y=m[3]?+m[3]:Y;if(y<100)y+=2000;ds=`${y}-${p2(+m[2])}-${p2(+m[1])}`;rooms=+m[4]}
+    else if((m=l.match(/^(\d{1,2})\D+(\d+)/))&&+m[1]>=1&&+m[1]<=31)ds=`${Y}-${p2(M)}-${p2(+m[1])}`,rooms=+m[2];
+    if(ds&&!isNaN(Date.parse(ds)))out.push({day:ds,rooms})}
+  return out;
+}
+function occRuleRow(r,i,dp){const sh=shiftsOf(dp);return`<div class="row" data-occ="${i}">Se occupazione <select class="o-op"><option value="min" ${r.max==null?'selected':''}>≥</option><option value="max" ${r.max!=null?'selected':''}>≤</option></select>
+  <input class="o-pct" type="number" min="0" max="100" style="width:64px" value="${r.max??r.min??''}">% → <input class="o-d" type="number" min="-5" max="5" style="width:58px" value="${r.delta??''}"> su <select class="o-sh">${sh.map(s=>`<option ${s.code===r.shift_code?'selected':''}>${s.code}</option>`).join('')}</select>
+  <input class="o-sk" placeholder="mansione (facolt.)" style="width:130px" value="${h(r.skill||'')}"></div>`}
+Object.assign(A,{
+  occ(){const dp=dept(ui.dept),R0=(dp.occ_rules&&dp.occ_rules.length?dp.occ_rules:[{min:85,shift_code:(shiftsOf(dp.id)[0]||{}).code,delta:1},{max:40,shift_code:(shiftsOf(dp.id)[0]||{}).code,delta:-1}]);
+    const cur=[...Array(daysIn()).keys()].filter(d=>D.occ.has(dateOf(d))).map(d=>`${d+1}\t${D.occ.get(dateOf(d))}`).join('\n');
+    modal(`<h3>Occupazione prevista · ${monthLabel(ui.month)}</h3><p class="muted">Incolla dal PMS (es. report Forecast di OPERA) una riga per giorno con data e camere occupate: "12/12/2026;140", "2026-12-12 140" o "12 140". Il personale si adatta da solo, come con gli eventi.</p>
+    <label class="f">Camere totali della struttura<input type="number" id="oc-tot" min="0" max="5000" value="${rules().totalRooms||''}" placeholder="Es. 160"></label>
+    <label class="f">Camere occupate per giorno<textarea id="oc-txt" rows="6" placeholder="1;120&#10;2;135&#10;...">${h(cur)}</textarea></label>
+    <h4 style="margin:14px 0 4px">Regole per ${h(dp.name)}</h4><div class="occrules" id="oc-rules">${R0.map((r,i)=>occRuleRow(r,i,dp.id)).join('')}</div>
+    <button class="link" style="padding-left:0" data-act="occaddrule">+ Aggiungi una regola</button>
+    <p class="muted" style="font-size:13px">Dopo aver salvato, usa "Rigenera…" per applicare l'occupazione ai turni.</p>`,
+    `<button class="ghost" data-act="mclose">Annulla</button><button class="primary" data-act="occsave">Salva</button>`)},
+  occaddrule(){const box=document.getElementById('oc-rules');box.insertAdjacentHTML('beforeend',occRuleRow({min:90,shift_code:(shiftsOf(ui.dept)[0]||{}).code,delta:1},box.children.length,ui.dept))},
+  async occsave(){const tot=document.getElementById('oc-tot').value,rows=parseOcc(document.getElementById('oc-txt').value);
+    const rules=[...document.querySelectorAll('#oc-rules [data-occ]')].map(r=>{const op=r.querySelector('.o-op').value,pct=r.querySelector('.o-pct').value;return{[op]:pct===''?null:+pct,shift_code:r.querySelector('.o-sh').value,skill:r.querySelector('.o-sk').value.trim()||null,delta:+r.querySelector('.o-d').value}});
+    const inMonthDays=new Set(rows.map(r=>r.day));const clear=[...D.occ.keys()].filter(k=>k.slice(0,7)===ui.month&&!inMonthDays.has(k));
+    closeModal();await run(async()=>{await api('save_occupancy',{total_rooms:tot===''?null:+tot,rows,clear});await api('save_occ_rules',{department_id:ui.dept,rules});return{message:`Occupazione salvata (${rows.length} giorni)`}})},
+  print(){const teams=(ui.tab==='turni'?editableTeams():D.departments.filter(dp=>dp.id===D.me.department_id));const n=daysIn(),days=[...Array(n).keys()];
+    const tbl=dp=>{const emps=employees(dp.id);return`<h2>${h(dp.name)}</h2><table><thead><tr><th class="n">${monthLabel(ui.month)}</th>${days.map(d=>`<th class="${isWe(d)||isHol(d)?'we':''}">${GG[dow(d)][0]}<br>${d+1}</th>`).join('')}<th>Gg</th></tr></thead><tbody>
+      ${emps.map(e=>{const s=seqOf(e.id);return`<tr><td class="n">${h(e.name)}</td>${s.map((c,d)=>{const lv=c==='R'&&leaveOn(e.id,d);return`<td class="${c==='R'?'R':''}">${c==='R'?(lv?LVL[lv.kind][0]:'·'):h(c)}</td>`}).join('')}<td>${s.filter(x=>x!=='R').length}</td></tr>`}).join('')}</tbody></table>
+      <div class="leg">${shiftsOf(dp.id).map(s=>`<span><b>${h(s.code)}</b> ${h(s.name)} ${s.start_time}–${s.end_time}</span>`).join('')}<span>· riposo</span><span>Fe ferie · Pe permesso · Ma malattia</span></div>`};
+    document.getElementById('print').innerHTML=`<h1>${h(D.business.name)} · Turni ${monthLabel(ui.month)}</h1><div>${isPublished(teams[0]&&teams[0].id)?'Pubblicati':'Bozza'} · stampato il ${new Date().toLocaleDateString('it-IT')}</div>${teams.map(tbl).join('')}`;
+    setTimeout(()=>window.print(),50)},
+  async snadd(v){const dep=(document.getElementById('sn-dept')||{}).value||v,text=document.getElementById('sn-text').value.trim();if(!text)return toast('Scrivi la consegna');
+    await run(()=>api('add_shift_note',{department_id:dep,day:document.getElementById('sn-day').value,shift_code:document.getElementById('sn-shift').value||null,text}),'Consegna aggiunta')},
+  sndone(v){const[id,d]=v.split('|');run(()=>api('done_shift_note',{id,done:d==='1'}))},
+  sndel(v){confirmBox('Eliminare questa consegna?','Elimina',()=>run(()=>api('done_shift_note',{id:v,delete:true}),'Eliminata'),true)},
+  /* --- 17. Face ID --- */
+  async passkeylogin(){try{busy(true);const{error}=await sb.auth.signInWithPasskey();if(error)throw error}catch(e){toast(/cancel|abort|NotAllowed/i.test(String(e.message||e))?'Accesso annullato':'Face ID non disponibile: accedi con la password e attivalo dal tuo profilo.')}finally{busy(false)}},
+  async passkeyadd(){try{const{error}=await sb.auth.registerPasskey();if(error)throw error;closeModal();toast('Face ID attivato: dalla prossima volta accedi con un tocco')}catch(e){toast(/cancel|abort|NotAllowed/i.test(String(e.message||e))?'Operazione annullata':'Non riesco ad attivarlo ora: '+(e.message||e))}},
+  /* --- 20. backup --- */
+  async exportall(){try{const data=await api('export_data');download(`turnario-backup-${todayStr()}.json`,JSON.stringify(data,null,1),'application/json');toast('Backup scaricato')}catch(e){toast(e.message)}},
+  exportcsv(){const rows=[['Team','Persona','Data','Turno','Inizio','Fine','Mansione']];
+    D.departments.forEach(dp=>employees(dp.id).forEach(e=>seqOf(e.id).forEach((c,d)=>{const s=sdef(dp.id,c),a=D.assignments.find(x=>x.member_id===e.id&&x.day===dateOf(d));const lv=c==='R'&&leaveOn(e.id,d);rows.push([dp.name,e.name,dateOf(d),c==='R'?(lv?LVL[lv.kind][1]:'Riposo'):s?s.name:c,s?s.start_time:'',s?s.end_time:'',(a&&a.skill)||''])})));
+    download(`turni-${ui.month}.csv`,'﻿'+rows.map(r=>r.map(x=>/[;"\n]/.test(x)?`"${String(x).replace(/"/g,'""')}"`:x).join(';')).join('\n'),'text/csv')},
+});
+function download(name,content,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([content],{type}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000)}
+const _profile=A.profile;
+A.profile=function(){_profile.apply(this,arguments);if(typeof sb.auth.registerPasskey!=='function'||!window.PublicKeyCredential)return;const box=document.querySelector('#modal .box');if(!box)return;
+  const p=box.querySelector('label.f');if(p)p.insertAdjacentHTML('beforebegin',`<div class="info" style="margin:4px 0 14px"><b>Accesso con Face ID</b><br>Niente password: entri con il volto o l'impronta.<div class="row" style="margin-top:10px"><button class="ghost sm" data-act="passkeyadd">Attiva Face ID</button></div></div>`)};
+const _regole=V.regole;
+V.regole=()=>{const html=_regole();if(!isMgr())return html;
+  return html+`<div class="card"><h3>Dati e privacy</h3><p class="muted">Backup completo della struttura (turni, persone, ferie, regole, storico). Le note riservate dei responsabili non sono incluse.</p>
+  <div class="row"><button class="ghost sm" data-act="exportall">Scarica il backup (JSON)</button><button class="ghost sm" data-act="exportcsv">Turni del mese (CSV per Excel)</button></div>
+  <p class="muted" style="font-size:13px;margin-top:10px"><a href="privacy.html" target="_blank" rel="noopener">Informativa privacy</a> · conservazione: turni e storico per 24 mesi, poi eliminabili.</p></div>`};
+</script>
+
 
 
 </body>
