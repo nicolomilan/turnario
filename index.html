@@ -256,6 +256,16 @@ textarea{min-height:96px;resize:vertical;line-height:1.45}
 .needrow{display:grid;grid-template-columns:1.3fr 1fr .7fr auto;gap:6px;align-items:center;margin-bottom:6px}
 .needrow input,.needrow select{min-height:40px;padding:8px 10px;font-size:15px}
 .skill{display:inline-block;font-size:11.5px;font-weight:600;padding:2px 8px;border-radius:999px;background:var(--glass-soft);border:1px solid var(--hair);margin-left:4px;color:var(--ink2)}
+.evrow td{height:12px;padding:0}
+.evrow td span{display:block;height:8px;margin:2px 1px;border-radius:4px}
+.evrow td.ev-busy span{background:#FF9F0A}.evrow td.ev-quiet span{background:#34C759}.evrow td.ev-info span{background:#64D2FF}
+.evrow td[data-act]{cursor:pointer}
+.tag.ev-busy{background:var(--warn-soft);color:var(--warn)}.tag.ev-quiet{background:var(--ok-soft);color:var(--ok)}.tag.ev-info{background:var(--info-soft);color:var(--info)}
+.evitem{display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-top:1px solid var(--hair)}
+.evitem:first-of-type{border-top:0}
+.evbar{width:6px;align-self:stretch;border-radius:3px;flex:0 0 6px}
+.adjrow{display:grid;grid-template-columns:1.6fr 1fr .7fr auto;gap:6px;align-items:center;margin-bottom:6px}
+.adjrow input,.adjrow select{min-height:40px;padding:8px 10px;font-size:15px}
 </style>
 </head>
 <body>
@@ -377,15 +387,16 @@ async function loadAll(){
     const ms=months.map(x=>x.month.slice(0,7));
     if(!ui.month){const cur=todayStr().slice(0,7);ui.month=ms.includes(cur)?cur:(ms.find(m=>m>cur)||ms[ms.length-1]||(isMgrRole(me)?monthAdd(cur,1):cur))}
     const from=`${ui.month}-01`,to=`${ui.month}-${pad(new Date(+ui.month.slice(0,4),+ui.month.slice(5,7),0).getDate())}`;
-    const [assignments,days,offers,notifs,log]=await Promise.all([
+    const [assignments,days,offers,notifs,log,events]=await Promise.all([
       sel(sb.from('assignments').select('member_id,day,code,skill').eq('business_id',b).gte('day',addD(from,-7)).lte('day',addD(to,7))),
       sel(sb.from('request_days').select('*').eq('business_id',b).gte('day',from).lte('day',to)),
       sel(sb.from('offers').select('*').eq('business_id',b).or(`and(day.gte.${from},day.lte.${to}),status.eq.pending`)),
       sel(sb.from('notifications').select('*').eq('member_id',me.id).order('created_at',{ascending:false}).limit(30)),
-      (me.role==='manager'||departments.some(d=>d.scheduler_id===me.id||d.deputy_id===me.id))?sel(sb.from('audit_log').select('*').eq('business_id',b).order('created_at',{ascending:false}).limit(30)):Promise.resolve([])]);
+      (me.role==='manager'||departments.some(d=>d.scheduler_id===me.id||d.deputy_id===me.id))?sel(sb.from('audit_log').select('*').eq('business_id',b).order('created_at',{ascending:false}).limit(30)):Promise.resolve([]),
+      sel(sb.from('events').select('*').eq('business_id',b).lte('date_from',to).gte('date_to',from).order('date_from'))]);
     const reqIds=[...new Set(days.map(x=>x.request_id).concat(offers.map(o=>o.request_id)))];
     const requests=reqIds.length?await sel(sb.from('requests').select('*').in('id',reqIds).order('created_at',{ascending:false})):[];
-    D={me,business,departments,shifts,members,months:ms,assignments,days,offers,notifs,log,requests,needs};
+    D={me,business,departments,shifts,members,months:ms,assignments,days,offers,notifs,log,requests,needs,events};
     if(!ui.dept||!dept(ui.dept)||!canEditTeam(ui.dept))ui.dept=(editableTeams()[0]||departments[0]||{}).id;
     ui.view='app';
   }finally{busy(false)}
@@ -505,7 +516,8 @@ V.mese=()=>{
   const nx=seq.findIndex((c,d)=>c!=='R'&&dateOf(d)>=today),ns=nx>=0&&sdef(me.department_id,seq[nx]);
   const hero=ns?`<div class="next" style="--c:${ns.color}"><small>${dateOf(nx)===today?'Oggi':'Prossimo turno'}</small><b>${fmt(nx)}</b><span>${h(ns.name)} · ${ns.start_time}–${ns.end_time}</span></div>`:'';
   const rows=seq.map((c,d)=>{const ds=dateOf(d),tag=dayTag(me.id,d),past=ds<today;
-    return`${d===0||dow(d)===1?`<div class="wk">Settimana del ${d+1}</div>`:''}<div class="day ${isWe(d)?'we':''} ${past?'past':''} ${ds===today?'today':''}"><div class="dd"><small>${GG[dow(d)]}</small><b>${d+1}</b></div><div class="ds">${shiftPill(me.department_id,c)}${tag}</div>${c!=='R'&&!tag&&!past?`<button class="ghost sm" data-act="quickreq" data-v="${d}">Chiedi libero</button>`:''}</div>`}).join('');
+    const evt=eventsOn(ds).map(e=>`<span class="tag ev-${e.impact}">${h(e.name)}</span>`).join('');
+    return`${d===0||dow(d)===1?`<div class="wk">Settimana del ${d+1}</div>`:''}<div class="day ${isWe(d)?'we':''} ${past?'past':''} ${ds===today?'today':''}"><div class="dd"><small>${GG[dow(d)]}</small><b>${d+1}</b></div><div class="ds">${shiftPill(me.department_id,c)}${tag}${evt}</div>${c!=='R'&&!tag&&!past?`<button class="ghost sm" data-act="quickreq" data-v="${d}">Chiedi libero</button>`:''}</div>`}).join('');
   return`<h2>${monthLabel(ui.month)}</h2>${pick}${hero}<div class="stats"><div><b>${w}</b><small>giorni di lavoro</small></div><div><b>${n-w}</b><small>riposi</small></div><div><b>${target()}</b><small>monte giorni</small></div></div><div class="chips">${chips}</div><div class="days">${rows}</div>`;
 };
 V.richiedi=()=>{
@@ -576,7 +588,9 @@ V.mrich=V.richieste;
 function grid(depId,{editable=false,meId=null}={}){
   const n=daysIn(),emps=employees(depId),days=[...Array(n).keys()],sh=shiftsOf(depId);
   if(!emps.length)return'<div class="card empty">Nessuna persona in questo reparto.</div>';
-  const head=`<tr><th class="sticky">${h((dept(depId)||{}).name)}</th>${days.map(d=>`<th class="${isWe(d)?'we':''}">${GG[dow(d)][0]}<br>${d+1}</th>`).join('')}<th>Gg</th></tr>`;
+  const evs=days.map(d=>eventsOn(dateOf(d)));
+  const head=`<tr><th class="sticky">${h((dept(depId)||{}).name)}</th>${days.map(d=>`<th class="${isWe(d)?'we':''}">${GG[dow(d)][0]}<br>${d+1}</th>`).join('')}<th>Gg</th></tr>`
+    +(evs.some(x=>x.length)?`<tr class="evrow"><td class="sticky">Eventi</td>${evs.map((x,d)=>x.length?`<td class="ev-${x.some(e=>e.impact==='busy')?'busy':x.some(e=>e.impact==='quiet')?'quiet':'info'}" data-act="evday" data-v="${dateOf(d)}" title="${h(x.map(e=>e.name).join(', '))}"><span></span></td>`:'<td></td>').join('')}<td></td></tr>`:'');
   const rows=emps.map(e=>{const seq=seqOf(e.id),vf=violFlagsCtx(e.id,depId),sf=softFlagsCtx(e.id);
     return`<tr class="${e.id===meId?'me':''}"><td class="sticky">${h(e.name)}</td>${seq.map((c,d)=>{const s=sdef(depId,c);
       return`<td class="c ${c==='R'?'R':''} ${editable?'edit':''} ${vf[d]?'viol':sf[d]?'exc':''} ${c==='R'&&isWe(d)?'we':''}" ${s?`style="--c:${s.color}"`:''} ${editable?`data-act="cell" data-v="${e.id}|${d}"`:''}><span>${c==='R'?'·':h(c)}</span></td>`}).join('')}<td><b>${seq.filter(x=>x!=='R').length}</b></td></tr>`}).join('');
@@ -585,7 +599,11 @@ function grid(depId,{editable=false,meId=null}={}){
   <div class="legend">${sh.map(s=>`<span class="chip"><i style="background:${s.color}"></i><b>${h(s.code)}</b> ${h(s.name)} ${s.start_time}–${s.end_time}</span>`).join('')}<span class="chip">· Riposo</span></div>`;
 }
 // fabbisogno del giorno per turno e mansione (stessa logica del server)
-function slotsForDay(depId,d){const out=[],wd=dow(d);for(const sh of shiftsOf(depId)){const rows=D.needs.filter(x=>x.shift_type_id===sh.id);
+const eventsOn=ds=>(D.events||[]).filter(e=>e.date_from<=ds&&e.date_to>=ds);
+function applyAdjust(slots,adj){const out=slots.map(x=>({...x}));for(const a of adj){const sl=out.find(x=>x.code===a.shift_code&&(x.skill||null)===(a.skill||null))||(!a.skill?out.find(x=>x.code===a.shift_code):null);
+  if(sl)sl.need=Math.max(0,sl.need+a.delta);else if(a.delta>0)out.push({code:a.shift_code,skill:a.skill||null,need:a.delta})}return out.filter(x=>x.need>0)}
+function slotsForDay(depId,d){return applyAdjust(baseSlots(depId,d),eventsOn(dateOf(d)).flatMap(e=>(e.adjustments||[]).filter(a=>a.department_id===depId)))}
+function baseSlots(depId,d){const out=[],wd=dow(d);for(const sh of shiftsOf(depId)){const rows=D.needs.filter(x=>x.shift_type_id===sh.id);
   if(!rows.length){if(sh.need>0)out.push({code:sh.code,skill:null,need:sh.need});continue}
   const by={};rows.forEach(r=>{const k=r.skill||'';if(r.weekday===null&&!(k in by))by[k]=r.need});rows.forEach(r=>{if(r.weekday===wd)by[r.skill||'']=r.need});
   Object.entries(by).forEach(([k,need])=>{if(need>0)out.push({code:sh.code,skill:k||null,need})})}return out}
@@ -605,13 +623,14 @@ V.turni=()=>{
   if(notGenerated())return`<h2>Turni</h2>${seg}<div class="toolbar">${monthPicker('f-month',list)}</div>
     <div class="card"><h3>${monthLabel(ui.month)}: turni da generare</h3><p class="muted">Genero i turni ${isMgr()?'di tutti i team':'del tuo team'} rispettando coperture per mansione, riposi, preferenze e note. Potrai poi ritoccarli a mano.</p>
     <div class="toggle"><input type="checkbox" id="f-notify" checked><label for="f-notify">Avvisa il personale quando sono pronti</label></div>
-    <button class="primary" data-act="generate">Genera i turni</button></div>`;
+    <button class="primary" data-act="generate">Genera i turni</button></div>${eventsCard(false)}`;
   const depId=ui.dept,emps=employees(depId);let unc=0,v=0;
   covRows(depId,emps,[...Array(daysIn()).keys()]).forEach(r=>r.cells.forEach(c=>{if(c)unc+=Math.max(0,c.need-c.k)}));
   let x=0;emps.forEach(e=>{v+=violFlagsCtx(e.id,depId).filter(Boolean).length;x+=softFlagsCtx(e.id).filter(Boolean).length});
   return`<h2>Turni</h2>${seg}<div class="toolbar">${monthPicker('f-month',list)}<button class="ghost sm" data-act="regen">Rigenera</button></div>
   <p class="muted">Tocca una cella per cambiare il turno. Bordo rosso = regola violata. Bordo arancio = 6° giorno di fila, ammesso solo in casi eccezionali.</p>
   ${grid(depId,{editable:true})}
+  ${eventsCard(true)}
   <div class="issues">${unc?`<span class="tag bad">${unc} turni scoperti</span>`:'<span class="tag ok">Copertura completa</span>'} ${v?`<span class="tag bad">${v} violazioni</span>`:'<span class="tag ok">Nessuna violazione</span>'} ${x?`<span class="tag warn">${x} giorni eccezionali (6° di fila)</span>`:''} <span class="tag">Monte giorni: ${target()}</span></div>`;
 };
 V.mrich=()=>{
@@ -1006,6 +1025,53 @@ document.addEventListener('submit',async ev=>{
   try{await api('dev_bootstrap',{name:f.get('name'),email:f.get('email'),password:f.get('password')});
     const{error}=await sb.auth.signInWithPassword({email:String(f.get('email')).trim().toLowerCase(),password:f.get('password')});if(error)throw error;history.replaceState(null,'',location.pathname)}
   catch(e){ui.err=e.message;render()}
+});
+</script>
+<script>
+"use strict";
+/* ================= Eventi (fiere, settimane della moda, giorni tranquilli) ================= */
+const EVK={busy:['Più lavoro','#FF9F0A'],quiet:['Meno lavoro','#34C759'],info:['Solo informativo','#64D2FF']};
+const fmtRange=e=>e.date_from===e.date_to?fmtS(e.date_from):`${fmtS(e.date_from)} → ${fmtS(e.date_to)}`;
+const adjText=a=>{const dp=dept(a.department_id),sh=sdef(a.department_id,a.shift_code);return`${dp?dp.name:'?'} · ${sh?sh.name:a.shift_code}${a.skill?' · '+a.skill:''} ${a.delta>0?'+':''}${a.delta}`};
+const canEditEvent=e=>isMgr()||(e.created_by===D.me.id&&editableTeams().length>0);
+function eventsCard(withRegen){
+  const E=editableTeams().length>0,evs=D.events||[];
+  if(!E&&!evs.length)return'';
+  return`<div class="card" style="margin-top:14px"><div class="row" style="justify-content:space-between"><h3 style="margin:0">Eventi di ${monthLabel(ui.month)}</h3>${E?'<button class="ghost sm" data-act="evnew">+ Evento</button>':''}</div>
+  <p class="muted">Fiere, settimane della moda, congressi o giorni tranquilli: cambiano quante persone servono e la generazione automatica ne tiene conto.</p>
+  ${evs.length?evs.map(e=>`<div class="evitem"><span class="evbar" style="background:${EVK[e.impact][1]}"></span><div class="grow"><b>${h(e.name)}</b><br><small>${fmtRange(e)} · ${EVK[e.impact][0]}</small>
+    ${(e.adjustments||[]).length?`<div style="margin-top:6px">${e.adjustments.map(a=>`<span class="skill" style="margin:0 4px 4px 0;display:inline-block">${h(adjText(a))}</span>`).join('')}</div>`:''}${e.note?`<div class="quote" style="margin:6px 0 0">${h(e.note)}</div>`:''}</div>
+    ${canEditEvent(e)?`<button class="ghost sm" data-act="evedit" data-v="${e.id}">Modifica</button>`:''}</div>`).join(''):'<div class="empty">Nessun evento in questo mese</div>'}
+  ${withRegen&&E&&evs.some(e=>(e.adjustments||[]).length)?`<p class="muted">Dopo aver aggiunto o cambiato un evento, rigenera i turni per applicarlo.</p><button class="ghost sm" data-act="regen">Rigenera con gli eventi</button>`:''}</div>`;
+}
+function adjRow(a={}){const opts=editableTeams().flatMap(dp=>shiftsOf(dp.id).map(s=>`<option value="${dp.id}|${s.code}" ${a.department_id===dp.id&&a.shift_code===s.code?'selected':''}>${h(dp.name)} · ${h(s.name)}</option>`)).join('');
+  return`<div class="adjrow"><select data-a="ds">${opts}</select><input list="skills-list2" placeholder="mansione" value="${h(a.skill||'')}" data-a="skill"><input type="number" min="-10" max="10" value="${a.delta??1}" data-a="delta"><button class="ghost sm danger" data-act="adjdel" aria-label="Elimina riga">✕</button></div>`}
+function eventSheet(e){
+  const first=editableTeams()[0],firstShift=first&&shiftsOf(first.id)[0];
+  const adj=e?e.adjustments||[]:(first&&firstShift?[{department_id:first.id,shift_code:firstShift.code,delta:1}]:[]);
+  const d0=e?e.date_from:dateOf(Math.max(0,new Date().getMonth()+1===+ui.month.slice(5)?new Date().getDate()-1:0)),d1=e?e.date_to:d0;
+  modal(`<h3>${e?'Modifica evento':'Nuovo evento'}</h3>
+  <label class="f">Nome<input id="ev-name" maxlength="80" value="${h(e?e.name:'')}" placeholder="Es. Fiera Milano, Fashion Week"></label>
+  <div class="two"><label class="f">Dal<input type="date" id="ev-from" value="${d0}"></label><label class="f">Al<input type="date" id="ev-to" value="${d1}"></label></div>
+  <label class="f">Tipo<select id="ev-impact">${Object.entries(EVK).map(([k,v])=>`<option value="${k}" ${e&&e.impact===k?'selected':''}>${v[0]}</option>`).join('')}</select></label>
+  <div style="margin:4px 0 6px"><b style="font-size:14px">Cosa cambia nei turni</b><p class="muted" style="margin:4px 0 8px">Per ogni turno, quante persone in più (+) o in meno (−) rispetto al solito. La mansione è facoltativa.</p>
+  <div id="ev-adj">${adj.map(adjRow).join('')}</div><button class="link" style="padding-left:0" data-act="adjadd">+ Aggiungi riga</button></div>
+  <datalist id="skills-list2">${allSkills().map(x=>`<option value="${h(x)}">`).join('')}</datalist>
+  <label class="f">Nota (facoltativa)<input id="ev-note" maxlength="300" value="${h(e&&e.note||'')}" placeholder="Es. pienone, arrivi dalle 14"></label>`,
+  `${e?`<button class="ghost danger" data-act="evdel" data-v="${e.id}">Elimina</button>`:''}<button class="ghost" data-act="mclose">Annulla</button><button class="primary" data-act="evsave" data-v="${e?e.id:''}">Salva</button>`);
+}
+Object.assign(A,{
+  evnew(){eventSheet(null)},
+  evedit(v){eventSheet(D.events.find(e=>e.id===v))},
+  adjadd(){document.getElementById('ev-adj').insertAdjacentHTML('beforeend',adjRow())},
+  adjdel(_v,t){t.closest('.adjrow').remove()},
+  evsave(v){const g=id=>document.getElementById(id).value;
+    const adjustments=[...document.querySelectorAll('#ev-adj .adjrow')].map(r=>{const[department_id,shift_code]=r.querySelector('[data-a=ds]').value.split('|');return{department_id,shift_code,skill:r.querySelector('[data-a=skill]').value.trim()||null,delta:+r.querySelector('[data-a=delta]').value}}).filter(a=>a.delta);
+    const p={id:v||undefined,name:g('ev-name').trim(),date_from:g('ev-from'),date_to:g('ev-to'),impact:g('ev-impact'),note:g('ev-note'),adjustments};
+    if(!p.name)return toast('Dai un nome all\'evento');if(!p.date_from||!p.date_to||p.date_to<p.date_from)return toast('Controlla le date');
+    closeModal();run(()=>api('save_event',p),adjustments.length&&D.months.includes(ui.month)?'Evento salvato: rigenera i turni per applicarlo':'Evento salvato')},
+  evdel(v){closeModal();confirmBox('Eliminare questo evento?','Elimina',()=>run(()=>api('delete_event',{event_id:v}),'Evento eliminato'),true)},
+  evday(v){const x=eventsOn(v);modal(`<h3>${fmtS(v)}</h3>${x.map(e=>`<div class="evitem"><span class="evbar" style="background:${EVK[e.impact][1]}"></span><div><b>${h(e.name)}</b><br><small>${fmtRange(e)} · ${EVK[e.impact][0]}</small>${(e.adjustments||[]).length?`<div style="margin-top:6px">${e.adjustments.map(a=>`<span class="skill" style="margin:0 4px 4px 0;display:inline-block">${h(adjText(a))}</span>`).join('')}</div>`:''}</div></div>`).join('')}`,`<button class="primary" data-act="mclose">Chiudi</button>`)}
 });
 </script>
 </body>

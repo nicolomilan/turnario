@@ -346,13 +346,14 @@ H.generate = async (me, p) => {
   needMember(me);
   if (!isMonth(p.month)) fail(400, 'Mese non valido.');
   const b = me.business_id, month = p.month, n = daysIn(month);
-  const [biz, allDepts, shifts, allMembers, needsRows, ruleRows] = await Promise.all([
+  const [biz, allDepts, shifts, allMembers, needsRows, ruleRows, evRows] = await Promise.all([
     q(db.from('businesses').select('*').eq('id', b).single()),
     q(db.from('departments').select('*').eq('business_id', b)),
     q(db.from('shift_types').select('*').eq('business_id', b)),
     q(db.from('members').select('*').eq('business_id', b).eq('active', true)),
     q(db.from('shift_needs').select('*').eq('business_id', b)),
     q(db.from('member_rules').select('*').eq('business_id', b)),
+    q(db.from('events').select('*').eq('business_id', b).lte('date_from', dateOf(month, n - 1)).gte('date_to', dateOf(month, 0))),
   ]) as any[];
   // la direzione genera tutti i team; un responsabile solo i suoi
   const depts = allDepts.filter((d: any) => (me.role === 'manager' || schedulesDept(me, d)) && (!p.department_id || d.id === p.department_id));
@@ -370,7 +371,10 @@ H.generate = async (me, p) => {
     if (!ids.length || !sh.length) continue;
     const needs = needsRows.filter((x: any) => sh.some((s: any) => s.id === x.shift_type_id)).map((x: any) => ({ ...x, shift_code: sh.find((s: any) => s.id === x.shift_type_id).code }));
     const skills = Object.fromEntries(members.map((m: any) => [m.id, m.skills || []]));
-    const best = bestSchedule({ shifts: sh, memberIds: ids, n, rules: biz.rules, seedBase: y * 12 + mo, pre, skills, needs, memberRules, dow }, 60);
+    // eventi del mese che riguardano questo team
+    const dayAdjust = (d: number) => { const day = dateOf(month, d);
+      return evRows.filter((e: any) => e.date_from <= day && e.date_to >= day).flatMap((e: any) => (e.adjustments || []).filter((a: any) => a.department_id === dp.id)); };
+    const best = bestSchedule({ shifts: sh, memberIds: ids, n, rules: biz.rules, seedBase: y * 12 + mo, pre, skills, needs, memberRules, dow, dayAdjust }, 60);
     unc += best.uncovered;
     for (const id of ids) best.seq[id].forEach((c: string, d: number) => { if (c !== 'R') rows.push({ business_id: b, member_id: id, day: dateOf(month, d), code: c, skill: best.skillSeq[id][d] }); });
   }
@@ -657,6 +661,42 @@ H.save_needs = async (me, p) => {
   }));
   await q(db.from('shift_needs').delete().eq('shift_type_id', st.id));
   if (rows.length) await q(db.from('shift_needs').insert(rows));
+  return { ok: true };
+};
+
+/* ---------- eventi (fiere, settimane della moda, giorni tranquilli) ---------- */
+H.save_event = async (me, p) => {
+  needMember(me);
+  const depts = await q(db.from('departments').select('*').eq('business_id', me.business_id)) as any[];
+  const editable = depts.filter((d) => me.role === 'manager' || schedulesDept(me, d));
+  if (!editable.length) fail(403, 'Solo chi fa i turni può gestire gli eventi.');
+  const name = String(p.name || '').trim().slice(0, 80); if (!name) fail(400, 'Dai un nome all\'evento.');
+  if (!isDate(p.date_from) || !isDate(p.date_to) || p.date_to < p.date_from) fail(400, 'Date non valide.');
+  const impact = ['busy', 'quiet', 'info'].includes(p.impact) ? p.impact : 'busy';
+  const shifts = await q(db.from('shift_types').select('department_id,code').eq('business_id', me.business_id)) as any[];
+  const adjustments = (Array.isArray(p.adjustments) ? p.adjustments : []).slice(0, 20).map((a: any) => {
+    if (!editable.some((d) => d.id === a.department_id)) fail(403, 'Puoi modificare solo i fabbisogni dei tuoi team.');
+    if (!shifts.some((s) => s.department_id === a.department_id && s.code === a.shift_code)) fail(400, 'Turno non valido.');
+    const delta = Math.max(-10, Math.min(10, Math.round(Number(a.delta) || 0)));
+    return { department_id: a.department_id, shift_code: a.shift_code, skill: a.skill ? cleanSkills([a.skill])[0] || null : null, delta };
+  }).filter((a: any) => a.delta !== 0);
+  const row = { business_id: me.business_id, name, date_from: p.date_from, date_to: p.date_to, impact, adjustments, note: String(p.note || '').slice(0, 300) || null };
+  if (p.id) {
+    const ev = (await q(db.from('events').select('*').eq('id', p.id).eq('business_id', me.business_id)) as any[])[0];
+    if (!ev) fail(404, 'Evento non trovato.');
+    if (ev.created_by !== me.id && me.role !== 'manager') fail(403, 'Può modificarlo solo chi l\'ha creato o la direzione.');
+    await q(db.from('events').update(row).eq('id', ev.id));
+  } else await q(db.from('events').insert({ ...row, created_by: me.id }));
+  await log(me.business_id, `${me.name} ha ${p.id ? 'modificato' : 'aggiunto'} l'evento "${name}" (${fmt(p.date_from)} – ${fmt(p.date_to)}).`);
+  return { ok: true };
+};
+H.delete_event = async (me, p) => {
+  needMember(me);
+  const ev = (await q(db.from('events').select('*').eq('id', p.event_id).eq('business_id', me.business_id)) as any[])[0];
+  if (!ev) fail(404, 'Evento non trovato.');
+  if (ev.created_by !== me.id && me.role !== 'manager') fail(403, 'Può eliminarlo solo chi l\'ha creato o la direzione.');
+  await q(db.from('events').delete().eq('id', ev.id));
+  await log(me.business_id, `${me.name} ha eliminato l'evento "${ev.name}".`);
   return { ok: true };
 };
 

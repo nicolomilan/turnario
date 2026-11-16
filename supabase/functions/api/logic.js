@@ -115,8 +115,20 @@ export function slotsFor(shifts, needs, weekday) {
   return out;
 }
 
+// Eventi (fiere, settimane della moda…): aggiustano il fabbisogno di un giorno, es. Mattina·cameriere +1
+export function applyAdjust(slots, adj = []) {
+  const out = slots.map((x) => ({ ...x }));
+  for (const a of adj) {
+    const sl = out.find((x) => x.code === a.shift_code && (x.skill || null) === (a.skill || null))
+      || (!a.skill ? out.find((x) => x.code === a.shift_code) : null);
+    if (sl) sl.need = Math.max(0, sl.need + a.delta);
+    else if (a.delta > 0) out.push({ code: a.shift_code, skill: a.skill || null, need: a.delta });
+  }
+  return out.filter((x) => x.need > 0);
+}
+
 // Genera i turni di un reparto per un mese. Ritorna { seq, skillSeq, score, uncovered, exceptions }
-export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skills = {}, needs = [], memberRules = {}, dow = () => -1 }) {
+export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skills = {}, needs = [], memberRules = {}, dow = () => -1, dayAdjust = () => [] }) {
   const R = rng(seed), T = targetDays(n, rules), emps = memberIds;
   const seq = {}, sk = {}, w = {}, consec = {}, cnt = {};
   const P = CTX_DAYS; // i primi P giorni sono la coda del mese precedente
@@ -145,7 +157,7 @@ export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skil
   let unc = 0;
   for (let d = P; d < P + n; d++) {
     const md = d - P, used = new Set();
-    const slots = slotsFor(shifts, needs, dow(md)).sort((a, b) => rarity(a.skill) - rarity(b.skill) || start[b.code] - start[a.code]);
+    const slots = applyAdjust(slotsFor(shifts, needs, dow(md)), dayAdjust(md)).sort((a, b) => rarity(a.skill) - rarity(b.skill) || start[b.code] - start[a.code]);
     for (const sl of slots) {
       const avg = emps.reduce((a, x) => a + cnt[x][sl.code], 0) / (emps.length || 1);
       for (let k = 0; k < sl.need; k++) {
