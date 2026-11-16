@@ -270,6 +270,11 @@ async function needNotesAccess(me: Me | null, memberId: string) {
   const m = (await q(db.from('members').select('*').eq('id', memberId).eq('business_id', me.business_id)) as Member[])[0];
   if (!m) fail(404, 'Persona non trovata.');
   const dp = await deptRow(me, m.department_id);
+  // chi fa i turni del proprio team (es. F&B manager) ha come superiore la direzione
+  if (dp && (dp.scheduler_id === m.id || dp.deputy_id === m.id) && me.role === 'manager' && me.id !== m.id) {
+    if (me._imp && !(await devReadsNotes())) fail(403, 'Accesso dello sviluppatore alle note disattivato.');
+    return { m, dp };
+  }
   await needNotesFor(me, dp);
   return { m, dp };
 }

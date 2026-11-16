@@ -266,6 +266,49 @@ textarea{min-height:96px;resize:vertical;line-height:1.45}
 .evbar{width:6px;align-self:stretch;border-radius:3px;flex:0 0 6px}
 .adjrow{display:grid;grid-template-columns:1.6fr 1fr .7fr auto;gap:6px;align-items:center;margin-bottom:6px}
 .adjrow input,.adjrow select{min-height:40px;padding:8px 10px;font-size:15px}
+
+/* ===== struttura in stile OPERA Cloud ===== */
+.top.op{gap:6px;padding:6px 6px 6px 6px}
+.op .icon{min-width:44px;min-height:44px;padding:0;display:grid;place-items:center;border-radius:50%}
+.op .icon svg{width:22px;height:22px}
+.op-prop{display:flex;flex-direction:column;align-items:flex-start;line-height:1.15;min-width:0;flex:1;padding:0 4px;cursor:pointer}
+.op-prop b{font-size:15px;letter-spacing:.02em}
+.op-prop small{max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.op-date{display:flex;flex-direction:column;align-items:flex-end;line-height:1.15;padding:0 6px}
+.op-date small{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em}
+.op-date b{font-size:13.5px;white-space:nowrap}
+.op .bell{position:relative}.op .bell .badge{position:absolute;top:0;right:0}
+@media (max-width:420px){.op-date{display:none}}
+.crumb{font-size:12.5px;color:var(--muted);margin:4px 4px 0;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+nav.bottom .rocket{color:#fff;background:var(--accent);box-shadow:0 6px 16px -6px rgba(0,122,255,.6)}
+nav.bottom .rocket span{color:#fff}
+.menu-mod{margin:14px 0 4px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.menu-item{display:flex;align-items:center;gap:12px;width:100%;text-align:left;min-height:48px;padding:8px 10px;border-radius:12px;font-weight:500;font-size:16px}
+.menu-item:active,.menu-item.on{background:var(--glass-soft)}
+.menu-item kbd{margin-left:auto;font:600 12px/1 ui-monospace,Menlo,monospace;padding:4px 7px;border-radius:6px;border:1px solid var(--hair);color:var(--muted)}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.tile{border-radius:var(--r-lg);padding:16px;cursor:pointer}
+.tile h4{margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.tile .big{font-size:34px;font-weight:700;letter-spacing:-.03em;line-height:1}
+.tile ul{margin:8px 0 0;padding:0;list-style:none}.tile li{padding:5px 0;border-top:1px solid var(--hair);font-size:14px}.tile li:first-child{border-top:0}
+.cal7{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.cal7 .hd{font-size:11px;font-weight:700;color:var(--muted);text-align:center;padding:4px 0}
+.cal7 .cd{min-height:64px;border-radius:10px;padding:4px;background:var(--glass-soft);border:1px solid var(--hair);font-size:12px;cursor:pointer;display:flex;flex-direction:column;gap:2px;overflow:hidden}
+.cal7 .cd.out{opacity:.25;cursor:default}.cal7 .cd.today{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.cal7 .cd b{font-size:13px}
+.cal7 .bar{height:5px;border-radius:3px}
+.cal7 .lbl{font-size:10px;line-height:1.1;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rep{width:100%;border-collapse:collapse;font-size:13.5px}
+.rep th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);text-align:center;padding:6px 4px;border-bottom:1px solid var(--hair)}
+.rep th:first-child,.rep td:first-child{text-align:left}
+.rep td{text-align:center;padding:8px 4px;border-bottom:1px solid var(--hair)}
+.rep td.bad{color:var(--bad);font-weight:700}.rep td.good{color:var(--ok)}
+.daynav{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.daynav b{flex:1;text-align:center;font-size:17px}
+.shiftblock{margin-bottom:10px}
+.shiftblock .who2{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.person{display:inline-flex;align-items:center;gap:6px;padding:4px 10px 4px 4px;border-radius:999px;background:var(--glass-soft);border:1px solid var(--hair);font-size:13.5px}
+.person .av{width:24px;height:24px;flex-basis:24px;font-size:10px}
 </style>
 </head>
 <body>
@@ -453,16 +496,11 @@ function _render(){
   if(ui.view==='dev')return renderDev();
   if(ui.view==='devboot')return app.innerHTML=vDevBoot();
   if(!D)return;
-  const M=isMgr(),S=myTeams().length>0;
-  const tabs=M?[['turni','Turni',I.cal],['richieste','Richieste',I.inbox],['staff','Personale',I.users],...(S?[['perso','Personalizza',I.spark]]:[]),['regole','Regole',I.cog]]
-            :S?[...(D.me.department_id?[['mese','Il mio mese',I.cal]]:[]),['turni','Team',I.users],['richieste','Richieste',I.inbox],['perso','Personalizza',I.spark],['regole','Regole',I.cog]]
-            :[['mese','Il mio mese',I.cal],['richiedi','Chiedi libero',I.plus],['richieste','Richieste',I.inbox],['reparto','Reparto',I.users],['prefs','Preferenze',I.heart]];
-  if(!ui.tab||!tabs.some(t=>t[0]===ui.tab))ui.tab=tabs[0][0];
+  const items=navItems();
+  if(!ui.tab||!items.some(t=>t.id===ui.tab))ui.tab='dashboard';
   const b=badge();
-  const imp=ui.asMember?`<div class="impbar"><span>Vedi come <b>${h(D.me.name)}</b> · ${h(D.me.job||(M?'Direzione':''))}</span><button class="ghost sm" data-act="impchoose">Cambia</button><button class="ghost sm" data-act="impexit">Esci</button></div>`:'';
-  app.innerHTML=`<header class="top"><div class="brand">${LOGO}<span>Turnario</span><small>· ${h(D.business.name)}</small></div><div class="who">${ui.dev&&!ui.asMember?`<button class="ghost sm" data-act="devhome">Sviluppatore</button>`:''}<button class="ghost sm" data-act="profile">${I.user.replace('<svg','<svg style="vertical-align:-4px;margin-right:4px"')}${h(D.me.name.split(' ')[0])}</button></div></header>${imp}
-  <main>${V[ui.tab]()}</main>
-  <nav class="bottom">${tabs.map(t=>`<button class="${ui.tab===t[0]?'on':''}" data-act="tab" data-v="${t[0]}">${t[2]}<span>${t[1]}</span>${t[0]==='richieste'&&b?`<i class="badge">${b}</i>`:''}</button>`).join('')}</nav>`;
+  const imp=ui.asMember?`<div class="impbar"><span>Vedi come <b>${h(D.me.name)}</b> · ${h(D.me.job||(isMgr()?'Direzione':''))}</span><button class="ghost sm" data-act="impchoose">Cambia</button><button class="ghost sm" data-act="impexit">Esci</button></div>`:'';
+  app.innerHTML=operaHeader(b)+imp+`<main>${operaCrumb()}${V[ui.tab]()}</main>`+operaBottom(b);
 }
 
 /* ===== accesso ===== */
@@ -921,7 +959,7 @@ V.prefs=()=>{
   const P=ui.prefs,me=D.me;
   if(!me.department_id)return`<h2>Preferenze</h2><div class="card empty">Non sei in un team.</div>`;
   if(!P.data&&!P.loading)setTimeout(loadPrefs,0);
-  const boss=(()=>{const d=dept(me.department_id);return d&&d.scheduler_id?name(d.scheduler_id):'il tuo responsabile'})();
+  const boss=(()=>{const d=dept(me.department_id);return d&&d.scheduler_id&&d.scheduler_id!==me.id&&d.deputy_id!==me.id?name(d.scheduler_id):'la direzione'})();
   return`<h2>Preferenze</h2><span class="lock">Le vedete solo tu e ${h(boss)}</span>
   <div class="card"><h3>Dimmi come preferisci lavorare</h3><p class="muted">Ne terremo conto quando si fanno i turni del mese, insieme alle esigenze del reparto.</p>
   <textarea id="pref-text" placeholder="Es. Preferisco le mattine. Il sabato non posso. Le notti se possibile meno.">${h(P.text||'')}</textarea>
@@ -1078,6 +1116,140 @@ Object.assign(A,{
     closeModal();run(()=>api('save_event',p),adjustments.length&&D.months.includes(ui.month)?'Evento salvato: rigenera i turni per applicarlo':'Evento salvato')},
   evdel(v){closeModal();confirmBox('Eliminare questo evento?','Elimina',()=>run(()=>api('delete_event',{event_id:v}),'Evento eliminato'),true)},
   evday(v){const x=eventsOn(v);modal(`<h3>${fmtS(v)}</h3>${x.map(e=>`<div class="evitem"><span class="evbar" style="background:${EVK[e.impact][1]}"></span><div><b>${h(e.name)}</b><br><small>${fmtRange(e)} · ${EVK[e.impact][0]}</small>${(e.adjustments||[]).length?`<div style="margin-top:6px">${e.adjustments.map(a=>`<span class="skill" style="margin:0 4px 4px 0;display:inline-block">${h(adjText(a))}</span>`).join('')}</div>`:''}</div></div>`).join('')}`,`<button class="primary" data-act="mclose">Chiudi</button>`)}
+});
+</script>
+<script>
+"use strict";
+/* ================= Struttura in stile OPERA Cloud =================
+   Header: struttura (property) · data di lavoro (business date) · Lancio rapido (F2) · notifiche
+   Menu a moduli: Profili (Client Relations) · Planning (Bookings) · Turno di oggi (Front Desk) · Report · Amministrazione · Toolbox */
+I.menu='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>';
+I.rocket='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 15c-1.5 1.5-2 4-2 6 2 0 4.5-.5 6-2"/><path d="M9 15l-3-3c1-4 5-9 12-9 0 7-5 11-9 12z"/><circle cx="14.5" cy="9.5" r="1.6"/></svg>';
+I.bell='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>';
+I.home='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="5" rx="2"/><rect x="13" y="10" width="8" height="11" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/></svg>';
+const propCode=()=>(D.business.name.replace(/hotel/i,'').trim().split(/\s+/).map(w=>w[0]).join('')+'HTL').toUpperCase().slice(0,5);
+const businessDate=()=>{const t=new Date();return`${GG[t.getDay()]} ${t.getDate()} ${MESI[t.getMonth()].slice(0,3).toLowerCase()} ${t.getFullYear()}`};
+function navItems(){
+  const M=isMgr(),E=editableTeams().length>0,S=myTeams().length>0,T=!!D.me.department_id;
+  return[
+    {id:'dashboard',mod:'Generale',label:'Dashboard',key:'D',show:true},
+    {id:'staff',mod:'Profili',label:'Profili dipendenti',key:'F',show:M},
+    {id:'perso',mod:'Profili',label:'Note riservate e regole',key:'N',show:S},
+    {id:'prefs',mod:'Profili',label:'Le mie preferenze',key:'V',show:T},
+    {id:'turni',mod:'Planning',label:'Planning turni',key:'P',show:E},
+    {id:'reparto',mod:'Planning',label:'Planning del mio team',key:'G',show:T&&!E},
+    {id:'mese',mod:'Planning',label:'Il mio planning',key:'M',show:T},
+    {id:'calendario',mod:'Planning',label:'Calendario struttura',key:'E',show:true},
+    {id:'richiedi',mod:'Planning',label:'Chiedi un giorno libero',key:'L',show:T},
+    {id:'oggi',mod:'Turno di oggi',label:'In turno oggi',key:'O',show:true},
+    {id:'richieste',mod:'Turno di oggi',label:'Richieste e scambi',key:'R',show:true},
+    {id:'report',mod:'Report',label:'Report turni e comodità',key:'T',show:E},
+    {id:'regole',mod:'Amministrazione',label:'Regole e codici turno',key:'C',show:E},
+    {id:'staff',mod:'Amministrazione',label:'Team e responsabili',key:'',show:M,alias:true},
+  ].filter(x=>x.show);
+}
+const itemLabel=id=>(navItems().find(x=>x.id===id&&!x.alias)||{}).label||'';
+function operaHeader(b){
+  const un=D.notifs.filter(n=>!n.read).length;
+  return`<header class="top op"><button class="ghost icon" data-act="menu" aria-label="Menu">${I.menu}</button>
+  <div class="op-prop" data-act="prop" title="Struttura"><b>${h(propCode())}</b><small>${h(D.business.name)}</small></div>
+  <div class="op-date" title="Data di lavoro"><small>Data di lavoro</small><b>${businessDate()}</b></div>
+  <button class="ghost icon" data-act="ql" aria-label="Lancio rapido (F2)">${I.rocket}</button>
+  <button class="ghost icon bell" data-act="notifs" aria-label="Notifiche">${I.bell}${un?`<i class="badge">${un}</i>`:''}</button>
+  <button class="ghost icon" data-act="profile" aria-label="Profilo">${I.user}</button></header>`;
+}
+const operaCrumb=()=>{const it=navItems().find(x=>x.id===ui.tab&&!x.alias);return it&&it.id!=='dashboard'?`<div class="crumb">${h(it.mod)}</div>`:''};
+function operaBottom(b){
+  const plan=navItems().some(x=>x.id==='turni')?'turni':'mese';
+  const B=[['dashboard','Dashboard',I.home],[plan,'Planning',I.cal],['__ql','Rapido',I.rocket],['richieste','Richieste',I.inbox],['__menu','Menu',I.menu]];
+  return`<nav class="bottom">${B.map(([id,l,ic])=>`<button class="${ui.tab===id?'on':''} ${id==='__ql'?'rocket':''}" data-act="${id==='__ql'?'ql':id==='__menu'?'menu':'tab'}" data-v="${id}">${ic}<span>${l}</span>${id==='richieste'&&b?`<i class="badge">${b}</i>`:''}</button>`).join('')}</nav>`;
+}
+function menuSheet(){
+  const it=navItems().filter(x=>!x.alias||x.mod==='Amministrazione'),mods=[...new Set(it.map(x=>x.mod))];
+  modal(`<h3>Menu</h3>${mods.map(m=>`<div class="menu-mod">${h(m)}</div>${it.filter(x=>x.mod===m).map(x=>`<button class="menu-item ${ui.tab===x.id?'on':''}" data-act="go2" data-v="${x.id}">${h(x.label)}${x.key?`<kbd>${x.key}</kbd>`:''}</button>`).join('')}`).join('')}
+  ${ui.dev?`<div class="menu-mod">Toolbox</div><button class="menu-item" data-act="devhome">Strutture e mappa</button><button class="menu-item" data-act="impchoose">Vedi come…</button>`:''}`,`<button class="primary" data-act="mclose">Chiudi</button>`);
+}
+function quickLaunch(){
+  const it=navItems().filter(x=>!x.alias);
+  modal(`<h3>Lancio rapido</h3><input id="ql-q" placeholder="Cerca una funzione o digita una lettera (es. O)" autocomplete="off" autofocus>
+  <div class="menu-mod">Collegamenti rapidi</div><div id="ql-list">${it.map(x=>`<button class="menu-item" data-act="go2" data-v="${x.id}" data-l="${h(norm(x.label+' '+x.mod))}" data-k="${x.key}">${h(x.label)}<kbd>${x.key||'·'}</kbd></button>`).join('')}</div>
+  <p class="muted" style="font-size:13px">Come in OPERA: premi <b>F2</b> per aprire il lancio rapido; una lettera e Invio aprono subito la funzione.</p>`,`<button class="ghost" data-act="mclose">Chiudi</button>`);
+  setTimeout(()=>{const q=document.getElementById('ql-q');if(!q)return;q.focus();
+    q.addEventListener('input',()=>{const v=norm(q.value.trim());document.querySelectorAll('#ql-list .menu-item').forEach(b=>{b.style.display=!v||b.dataset.l.includes(v)||b.dataset.k.toLowerCase()===v?'':'none'})});
+    q.addEventListener('keydown',e=>{if(e.key!=='Enter')return;const v=q.value.trim().toUpperCase();const k=[...document.querySelectorAll('#ql-list .menu-item')].find(b=>b.dataset.k===v)||[...document.querySelectorAll('#ql-list .menu-item')].find(b=>b.style.display!=='none');if(k)k.click()})},50);
+}
+document.addEventListener('keydown',e=>{if(e.key==='F2'&&D&&ui.view==='app'){e.preventDefault();quickLaunch()}});
+
+/* ----- Dashboard a riquadri ----- */
+function todayIdx(){const t=todayStr();return t.slice(0,7)===ui.month?Number(t.slice(8,10))-1:-1}
+function teamOnDay(depId,d){return employees(depId).map(e=>({e,c:seqOf(e.id)[d],a:D.assignments.find(x=>x.member_id===e.id&&x.day===dateOf(d))})).filter(x=>x.c!=='R')}
+V.dashboard=()=>{
+  const me=D.me,ti=todayIdx(),E=editableTeams(),tiles=[];
+  if(me.department_id&&!notGenerated()){const seq=seqOf(me.id),today=todayStr(),nx=seq.findIndex((c,d)=>c!=='R'&&dateOf(d)>=today),ns=nx>=0&&sdef(me.department_id,seq[nx]);
+    tiles.push(`<div class="tile card" data-act="tab" data-v="mese"><h4>Il mio prossimo turno</h4>${ns?`<div class="big" style="color:${ns.color}">${fmt(nx)}</div><div class="muted" style="margin:6px 0 0">${h(ns.name)} · ${ns.start_time}–${ns.end_time}</div>`:'<div class="muted">Nessun turno in programma</div>'}</div>`)}
+  if(ti>=0&&!notGenerated()){const teams=D.departments;let tot=0;const rows=teams.map(dp=>{const x=teamOnDay(dp.id,ti);tot+=x.length;return`<li><b>${h(dp.name)}</b> · ${x.length} in turno</li>`}).join('');
+    tiles.push(`<div class="tile card" data-act="tab" data-v="oggi"><h4>In turno oggi</h4><div class="big">${tot}</div><ul>${rows}</ul></div>`)}
+  const todo=D.days.filter(x=>(x.status==='awaiting_manager'||x.status==='failed')&&canEditMember(x.member_id)).length,po=pendingOffersForMe().length;
+  tiles.push(`<div class="tile card" data-act="tab" data-v="richieste"><h4>Richieste in coda</h4><div class="big">${todo+po}</div><ul>${E.length?`<li>${todo} da gestire nel team</li>`:''}${me.department_id?`<li>${po} proposte di cambio per te</li>`:''}</ul></div>`);
+  if(E.length&&!notGenerated()){const start=Math.max(0,ti),end=Math.min(daysIn(),start+7);let unc=0;E.forEach(dp=>covRows(dp.id,employees(dp.id),[...Array(end-start).keys()].map(i=>i+start)).forEach(r=>r.cells.forEach(c=>{if(c)unc+=Math.max(0,c.need-c.k)})));
+    tiles.push(`<div class="tile card" data-act="tab" data-v="turni"><h4>Copertura prossimi 7 giorni</h4><div class="big" style="color:${unc?'var(--bad)':'var(--ok)'}">${unc?unc+' scoperti':'OK'}</div><div class="muted" style="margin:6px 0 0">${E.map(d=>h(d.name)).join(' · ')}</div></div>`)}
+  const today=todayStr(),evs=(D.events||[]).filter(e=>e.date_to>=today).slice(0,4);
+  tiles.push(`<div class="tile card" data-act="tab" data-v="calendario"><h4>Calendario struttura</h4>${evs.length?`<ul>${evs.map(e=>`<li><span class="tag ev-${e.impact}">${h(e.name)}</span> <small>${fmtRange(e)}</small></li>`).join('')}</ul>`:'<div class="muted">Nessun evento in arrivo</div>'}</div>`);
+  if(E.length&&!notGenerated()){const r=comfortRows();const bad=r.filter(x=>x.badWk||x.badBlock).length,iso=r.reduce((a,x)=>a+x.isolated,0);
+    tiles.push(`<div class="tile card" data-act="tab" data-v="report"><h4>Comodità dei turni</h4><div class="big" style="color:${bad?'var(--warn)':'var(--ok)'}">${bad?bad+' da rivedere':'OK'}</div><ul><li>${iso} giorni isolati</li><li>${r.filter(x=>x.badWk).length} senza weekend libero</li></ul></div>`)}
+  const ns=D.notifs.slice(0,3);
+  tiles.push(`<div class="tile card" data-act="notifs"><h4>Notifiche</h4>${ns.length?`<ul>${ns.map(n=>`<li>${h(n.text)}</li>`).join('')}</ul>`:'<div class="muted">Nessuna notifica</div>'}</div>`);
+  return`<h2>Dashboard</h2><div class="tiles">${tiles.join('')}</div>`;
+};
+
+/* ----- Turno di oggi (Front Desk) ----- */
+V.oggi=()=>{
+  if(notGenerated())return`<h2>In turno oggi</h2><div class="card empty">I turni di ${monthLabel(ui.month)} non sono ancora pubblicati.</div>`;
+  if(ui.oggiD==null||ui.oggiD>=daysIn())ui.oggiD=Math.max(0,todayIdx());
+  const d=ui.oggiD,evs=eventsOn(dateOf(d));
+  return`<h2>In turno</h2><div class="daynav"><button class="ghost sm" data-act="oggimove" data-v="-1" aria-label="Giorno precedente">‹</button><b>${fmt(d)}${dateOf(d)===todayStr()?' · oggi':''}</b><button class="ghost sm" data-act="oggimove" data-v="1" aria-label="Giorno successivo">›</button></div>
+  ${evs.length?`<div style="margin-bottom:10px">${evs.map(e=>`<span class="tag ev-${e.impact}">${h(e.name)}</span>`).join(' ')}</div>`:''}
+  ${D.departments.map(dp=>{const sh=shiftsOf(dp.id),list=teamOnDay(dp.id,d);
+    return`<div class="card"><h3>${h(dp.name)}</h3>${sh.map(s=>{const p=list.filter(x=>x.c===s.code);return`<div class="shiftblock"><span class="pill" style="background:${s.color}">${h(s.name)}</span> <small>${s.start_time}–${s.end_time} · ${p.length}</small>
+      <div class="who2">${p.map(x=>`<span class="person">${av(x.e.id)}${h(x.e.name)}${x.a&&x.a.skill?` <small>${h(x.a.skill)}</small>`:''}</span>`).join('')||'<small class="muted">Nessuno</small>'}</div></div>`}).join('')}</div>`}).join('')}`;
+};
+
+/* ----- Calendario struttura (Property Calendar) ----- */
+V.calendario=()=>{
+  const n=daysIn(),first=(dow(0)+6)%7,today=todayStr(),cells=[];
+  for(let i=0;i<first;i++)cells.push('<div class="cd out"></div>');
+  for(let d=0;d<n;d++){const ds=dateOf(d),evs=eventsOn(ds);cells.push(`<div class="cd ${ds===today?'today':''}" data-act="${evs.length?'evday':''}" data-v="${ds}"><b>${d+1}</b>${evs.slice(0,2).map(e=>`<span class="bar" style="background:${EVK[e.impact][1]}"></span><span class="lbl">${h(e.name)}</span>`).join('')}</div>`)}
+  const all=[...new Set([...D.months,...[0,1,2,3,4,5].map(k=>monthAdd(todayStr().slice(0,7),k))])].sort();
+  return`<h2>Calendario struttura</h2><div class="toolbar">${monthPicker('f-month',all)}</div>
+  <div class="card"><div class="cal7">${['L','M','M','G','V','S','D'].map(x=>`<div class="hd">${x}</div>`).join('')}${cells.join('')}</div></div>${eventsCard(true)}`;
+};
+
+/* ----- Report turni e comodità ----- */
+function wkPairs(){const n=daysIn(),out=[];for(let d=0;d<n-1;d++)if(dow(d)===6&&dow(d+1)===0)out.push([d,d+1]);return out}
+function comfortRows(){
+  const R0=rules(),wk=wkPairs();
+  return editableTeams().flatMap(dp=>employees(dp.id).map(e=>{const seq=seqOf(e.id),pre=ctxOf(e.id,-1),all=[...pre,...seq];
+    let iso=0,maxRest=0,run=0;all.forEach((c,i)=>{if(c==='R'){run++;if(i>=7)maxRest=Math.max(maxRest,run)}else{run=0;if(i>=7&&(all[i-1]==='R')&&(i===all.length-1||all[i+1]==='R'))iso++}});
+    const freeW=wk.filter(([a,b])=>seq[a]==='R'&&seq[b]==='R').length,workW=wk.length-freeW,nights=seq.filter(c=>{const s=sdef(dp.id,c);return s&&toMin(s.end_time)<=toMin(s.start_time)}).length;
+    const six=softFlagsCtx(e.id).filter(Boolean).length;
+    return{e,dp,days:seq.filter(c=>c!=='R').length,nights,workW,freeW,maxRest,isolated:iso,six,badWk:(R0.freeWeekends??1)>0&&freeW<(R0.freeWeekends??1),badBlock:(R0.restBlock??3)>1&&maxRest<(R0.restBlock??3)}}));
+}
+V.report=()=>{
+  if(notGenerated())return`<h2>Report</h2><div class="card empty">Turni di ${monthLabel(ui.month)} non ancora generati.</div>`;
+  const rows=comfortRows(),R0=rules();
+  return`<h2>Report turni</h2><div class="toolbar">${monthPicker('f-month',D.months)}</div>
+  <p class="muted">Regole di comodità: almeno ${R0.restBlock??3} riposi di fila, almeno ${R0.freeWeekends??1} weekend libero, niente giorni isolati, massimo ${R0.maxConsec} giorni di fila (${exCap()} solo in casi eccezionali).</p>
+  ${editableTeams().map(dp=>`<div class="card" style="overflow-x:auto"><h3>${h(dp.name)}</h3><table class="rep"><thead><tr><th>Persona</th><th>Giorni</th><th>Notti</th><th>Weekend lav.</th><th>Weekend liberi</th><th>Riposo max</th><th>Isolati</th><th>6° di fila</th></tr></thead><tbody>
+  ${rows.filter(r=>r.dp.id===dp.id).map(r=>`<tr><td>${h(r.e.name)}</td><td>${r.days}</td><td>${r.nights}</td><td>${r.workW}</td><td class="${r.badWk?'bad':'good'}">${r.freeW}</td><td class="${r.badBlock?'bad':'good'}">${r.maxRest}</td><td class="${r.isolated?'bad':''}">${r.isolated}</td><td class="${r.six?'bad':''}">${r.six}</td></tr>`).join('')}</tbody></table></div>`).join('')}`;
+};
+
+Object.assign(A,{
+  menu:menuSheet, ql:quickLaunch,
+  go2(v){closeModal();ui.tab=v;render();scrollTo(0,0)},
+  notifs(){modal(`<h3>Notifiche</h3>${D.notifs.length?D.notifs.map(n=>`<div class="notif ${n.read?'':'new'}">${h(n.text)} <small>· ${ago(n.created_at)}</small></div>`).join(''):'<div class="empty">Nessuna notifica</div>'}`,`<button class="primary" data-act="mclose">Chiudi</button>`);markReadSoon()},
+  prop(){modal(`<h3>Struttura</h3><p><b>${h(propCode())}</b> · ${h(D.business.name)}${D.business.address?'<br><small>'+h(D.business.address)+'</small>':''}</p><p class="muted">Data di lavoro: ${businessDate()} · Turni visibili: ${monthLabel(ui.month)}</p>`,
+    `${ui.dev?'<button class="ghost" data-act="devhome">Cambia struttura</button>':''}<button class="primary" data-act="mclose">Chiudi</button>`)},
+  oggimove(v){const n=ui.oggiD+ +v;if(n<0||n>=daysIn()){ui.month=monthAdd(ui.month,+v);ui.oggiD=+v>0?0:null;loadAll().then(()=>{if(ui.oggiD==null)ui.oggiD=daysIn()-1;render()}).catch(e=>toast(e.message));return}ui.oggiD=n;render()}
 });
 </script>
 </body>
