@@ -273,7 +273,7 @@ async function needNotesAccess(me: Me | null, memberId: string) {
   await needNotesFor(me, dp);
   return { m, dp };
 }
-const RULE_KINDS = ['avoid_shift', 'prefer_shift', 'only_shifts', 'max_per_month', 'unavailable_weekday', 'avoid_weekday'];
+const RULE_KINDS = ['avoid_shift', 'prefer_shift', 'only_shifts', 'max_per_month', 'unavailable_weekday', 'avoid_weekday', 'max_weekends_per_month'];
 async function cleanRules(me: Me, m: Member, rules: any[], source: 'pref' | 'note') {
   if (!Array.isArray(rules) || rules.length > 12) fail(400, 'Regole non valide.');
   const codes = ((await q(db.from('shift_types').select('code').eq('department_id', m.department_id)) as any[]) || []).map((x) => x.code);
@@ -284,6 +284,7 @@ async function cleanRules(me: Me, m: Member, rules: any[], source: 'pref' | 'not
     if (['avoid_shift', 'prefer_shift', 'max_per_month'].includes(r.kind)) { if (!codes.includes(r.shift_code)) fail(400, 'Turno non valido nella regola.'); row.shift_code = r.shift_code; }
     if (r.kind === 'only_shifts') { const l = (r.shift_codes || []).filter((x: string) => codes.includes(x)); if (!l.length) fail(400, 'Turni non validi nella regola.'); row.shift_codes = l; }
     if (r.kind === 'max_per_month') { const v = Math.round(Number(r.value)); if (!(v >= 0 && v <= 31)) fail(400, 'Numero non valido.'); row.value = v; }
+    if (r.kind === 'max_weekends_per_month') { const v = Math.round(Number(r.value)); if (!(v >= 0 && v <= 5)) fail(400, 'Numero di weekend non valido.'); row.value = v; }
     if (['unavailable_weekday', 'avoid_weekday'].includes(r.kind)) { const d = Math.round(Number(r.weekday)); if (!(d >= 0 && d <= 6)) fail(400, 'Giorno non valido.'); row.weekday = d; }
     return row;
   });
@@ -411,7 +412,7 @@ H.save_settings = async (me, p) => {
   const r = p.rules || {};
   const int = (v: any, lo: number, hi: number, d: number) => { const x = Math.round(Number(v)); return Number.isFinite(x) ? Math.min(hi, Math.max(lo, x)) : d; };
   const maxConsec = int(r.maxConsec, 1, 14, 5);
-  const rules = { maxConsec, maxConsecEx: int(r.maxConsecEx ?? maxConsec + 1, maxConsec, 14, maxConsec + 1), minRest: int(r.minRest, 0, 24, 11), restPerWeek: int(r.restPerWeek, 0, 4, 2), restAfterNight: int(r.restAfterNight ?? 2, 0, 4, 2), sendTo: int(r.sendTo, 1, 10, 3), managerApproval: !!r.managerApproval };
+  const rules = { maxConsec, maxConsecEx: int(r.maxConsecEx ?? maxConsec + 1, maxConsec, 14, maxConsec + 1), minRest: int(r.minRest, 0, 24, 11), restPerWeek: int(r.restPerWeek, 0, 4, 2), restAfterNight: int(r.restAfterNight ?? 2, 0, 4, 2), restBlock: int(r.restBlock ?? 3, 0, 7, 3), freeWeekends: int(r.freeWeekends ?? 1, 0, 2, 1), noSingleDays: r.noSingleDays !== false, sendTo: int(r.sendTo, 1, 10, 3), managerApproval: !!r.managerApproval };
   await q(db.from('businesses').update({ rules, ...(p.name ? { name: String(p.name).trim() } : {}) }).eq('id', me.business_id));
   for (const s of p.shifts || []) {
     const t = /^\d\d:\d\d$/;
@@ -769,7 +770,8 @@ const TEMPLATE_FULL = [
   { key: 'dir', name: 'Direzione', shifts: [
     { code: 'G', name: 'Giornata', start_time: '09:00', end_time: '17:00', need: 0, color: '#0E7490', needs: [
       { skill: null, weekday: null, need: 1 }, ...[1, 2, 3, 4, 5].map((w) => ({ skill: null, weekday: w, need: 2 }))] },
-    { code: 'S', name: 'Sera', start_time: '14:00', end_time: '22:00', need: 1, color: '#6D28D9' }] },
+    { code: 'S', name: 'Sera', start_time: '14:00', end_time: '22:00', need: 0, color: '#6D28D9', needs: [
+      { skill: null, weekday: null, need: 0 }, ...[1, 2, 3, 4, 5].map((w) => ({ skill: null, weekday: w, need: 1 }))] }] },
   { key: 'fo', name: 'Front Office', shifts: [
     { code: 'M', name: 'Mattina', start_time: '07:00', end_time: '15:00', need: 2, color: '#D97706' },
     { code: 'P', name: 'Pomeriggio', start_time: '15:00', end_time: '23:00', need: 1, color: '#2563EB' },
@@ -783,7 +785,7 @@ const TEMPLATE_FULL = [
 ];
 const DEMO_STAFF: [string, string, string, string[], string?][] = [
   // nome, team, ruolo, mansioni, responsabilità
-  ['Giorgio Bellini', '', 'Direttore', [], 'admin'],
+  ['Giorgio Bellini', 'dir', 'Direttore', [], 'admin'],
   ['Federica Neri', 'dir', 'Vice Direttore', []],
   ['Alessandro Riva', 'dir', 'Front Office Manager', [], 'fo-scheduler'],
   ['Silvia Gatti', 'dir', 'Reservation Manager', []],
@@ -793,7 +795,7 @@ const DEMO_STAFF: [string, string, string, string[], string?][] = [
   ['Roberto Galli', 'fb', 'F&B Manager', ['manager', 'cameriere'], 'fb-scheduler'],
   ['Paolo Greco', 'fb', 'Chef', ['chef']], ['Anna Ferri', 'fb', 'Chef', ['chef']],
   ['Luca Moretti', 'fb', 'Cameriere', ['cameriere']], ['Sara Conti', 'fb', 'Cameriera', ['cameriere']], ['Matteo Costa', 'fb', 'Cameriere', ['cameriere']],
-  ['Giulia Marini', 'fb', 'Cameriera', ['cameriere']], ['Andrea Leone', 'fb', 'Cameriere', ['cameriere']],
+  ['Giulia Marini', 'fb', 'Cameriera', ['cameriere']], ['Andrea Leone', 'fb', 'Cameriere', ['cameriere']], ['Elena Bassi', 'fb', 'Cameriera', ['cameriere']],
 ];
 async function needDev(user: any) {
   const r = await q(db.from('platform_admins').select('user_id').eq('user_id', user?.id || '00000000-0000-0000-0000-000000000000')) as any[];
@@ -835,7 +837,16 @@ D.dev_create_hotel = async (u, p) => {
     for (const [nm, team, job, skills, resp] of DEMO_STAFF) {
       const m = await q(db.from('members').insert({ business_id: biz.id, department_id: team ? dep[team].id : null, name: nm, email: demoEmail(nm), role: resp === 'admin' ? 'manager' : 'employee', job, skills }).select().single()) as any;
       if (resp) roles[resp] = m.id;
+      roles['name:' + nm] = m.id;
     }
+    // regole di esempio della direzione: direttore mai nel weekend, vice al massimo un weekend, FO manager e assistente il meno possibile
+    const R = (nm: string, kind: string, extra: any, label: string) => ({ business_id: biz.id, member_id: roles['name:' + nm], source: 'note', kind, weight: 3, label, ...extra });
+    await q(db.from('member_rules').insert([
+      R('Giorgio Bellini', 'unavailable_weekday', { weekday: 6 }, 'Mai di sabato'), R('Giorgio Bellini', 'unavailable_weekday', { weekday: 0 }, 'Mai di domenica'),
+      R('Federica Neri', 'max_weekends_per_month', { value: 1 }, 'Max 1 weekend al mese'),
+      R('Alessandro Riva', 'avoid_weekday', { weekday: 6 }, 'Evitare il sabato'), R('Alessandro Riva', 'avoid_weekday', { weekday: 0 }, 'Evitare la domenica'),
+      R('Lorenzo Fabbri', 'avoid_weekday', { weekday: 6 }, 'Evitare il sabato'), R('Lorenzo Fabbri', 'avoid_weekday', { weekday: 0 }, 'Evitare la domenica'),
+    ]));
     await q(db.from('departments').update({ scheduler_id: roles['admin'] }).eq('id', dep.dir.id));
     await q(db.from('departments').update({ scheduler_id: roles['fo-scheduler'], deputy_id: roles['fo-deputy'] }).eq('id', dep.fo.id));
     await q(db.from('departments').update({ scheduler_id: roles['fb-scheduler'] }).eq('id', dep.fb.id));

@@ -708,7 +708,7 @@ const A={
   async copycred(){try{await navigator.clipboard.writeText(document.getElementById('cred').textContent);toast('Copiato')}catch(e){toast('Copia non riuscita: seleziona il testo')}},
   saverules(){const shifts=D.shifts.map(s=>({id:s.id,name:s.name,start_time:s.start_time,end_time:s.end_time,need:s.need}));
     document.querySelectorAll('[data-sh]').forEach(inp=>{const[id,f]=inp.dataset.sh.split('|');const s=shifts.find(x=>x.id===id);if(s)s[f]=f==='need'?+inp.value:inp.value});
-    const r={...rules(),minRest:+document.getElementById('r-rest').value,maxConsec:+document.getElementById('r-consec').value,maxConsecEx:+document.getElementById('r-consecx').value,restPerWeek:+document.getElementById('r-rpw').value,restAfterNight:+document.getElementById('r-night').value,sendTo:+document.getElementById('r-send').value};
+    const r={...rules(),minRest:+document.getElementById('r-rest').value,maxConsec:+document.getElementById('r-consec').value,maxConsecEx:+document.getElementById('r-consecx').value,restPerWeek:+document.getElementById('r-rpw').value,restAfterNight:+document.getElementById('r-night').value,restBlock:+((document.getElementById('r-block')||{}).value??3),freeWeekends:+((document.getElementById('r-wkfree')||{}).value??1),noSingleDays:(document.getElementById('r-single')||{checked:true}).checked,sendTo:+document.getElementById('r-send').value};
     run(()=>api('save_settings',{rules:r,shifts}),'Regole salvate')},
   addshift(v){modal(`<h3>Nuovo turno · ${h(dept(v).name)}</h3><div class="two"><label class="f">Sigla (1-2 lettere)<input id="s-code" maxlength="2" placeholder="Es. S"></label><label class="f">Nome<input id="s-name" placeholder="Es. Spezzato"></label>
     <label class="f">Inizio<input type="time" id="s-start" value="09:00"></label><label class="f">Fine<input type="time" id="s-end" value="17:00"></label><label class="f">Persone necessarie<input type="number" id="s-need" value="1" min="0"></label></div>`,
@@ -841,7 +841,7 @@ function weightOf(t){if(/(il piu possibile|assolutamente|sempre|molto|necessit|t
 const PRI=['','bassa','media','alta'];
 function ruleLabel(r,depId){const nm=c=>(sdef(depId,c)||{}).name||c;
   return r.kind==='avoid_shift'?`Evitare: ${nm(r.shift_code)}`:r.kind==='prefer_shift'?`Preferire: ${nm(r.shift_code)}`:r.kind==='only_shifts'?`Solo: ${r.shift_codes.map(nm).join(', ')}`
-    :r.kind==='max_per_month'?(r.value===0?`Mai: ${nm(r.shift_code)}`:`Max ${r.value} ${nm(r.shift_code)} al mese`):r.kind==='unavailable_weekday'?`Mai di ${WD[r.weekday].replace('i$','ì')}`:`Evitare il ${WD[r.weekday]}`}
+    :r.kind==='max_per_month'?(r.value===0?`Mai: ${nm(r.shift_code)}`:`Max ${r.value} ${nm(r.shift_code)} al mese`):r.kind==='unavailable_weekday'?`Mai di ${WD[r.weekday]}`:r.kind==='max_weekends_per_month'?(r.value===0?'Mai nel weekend':`Max ${r.value} weekend al mese`):`Evitare il ${WD[r.weekday]}`}
 function parseSentence(t,depId){
   const lex=shiftLex(depId),rules=[],w=weightOf(t);let sh=findShifts(t,lex);
   const nightCodes=lex.filter(x=>x.night).map(x=>x.code),dayCodes=lex.filter(x=>!x.night).map(x=>x.code);
@@ -854,7 +854,10 @@ function parseSentence(t,depId){
   WD.forEach((d,i)=>{const r=new RegExp('\\b(il |la |i |le |di |nei |ai )?'+d.slice(0,5)+'\\w*').exec(t);if(!r)return;
     if(/(non (puo|riesce|e disponibile|c'e)|mai|impossibil|indisponibil)/.test(t))rules.push({kind:'unavailable_weekday',weekday:i,weight:3});
     else if(/(evit|meglio non|preferi\w* non|non (vuole|ama|gli piace|le piace))/.test(t))rules.push({kind:'avoid_weekday',weekday:i,weight:w})});
-  if(/\bweekend\b|fine settimana/.test(t)&&/(non (puo|riesce)|mai)/.test(t))[6,0].forEach(i=>rules.push({kind:'unavailable_weekday',weekday:i,weight:3}));
+  const wkm=/(\d+|un|uno|una|due|tre)\s+(weekend|fine settimana)\s+(al|a|nel|ogni)\s+mese/.exec(t);
+  if(wkm)rules.push({kind:'max_weekends_per_month',value:/^\d+$/.test(wkm[1])?+wkm[1]:(NUMW[wkm[1]]??1),weight:3});
+  else if(/\bweekend\b|fine settimana/.test(t)&&/(non (puo|riesce|lavora)|mai|niente)/.test(t))[6,0].forEach(i=>rules.push({kind:'unavailable_weekday',weekday:i,weight:3}));
+  else if(/\bweekend\b|fine settimana/.test(t)&&/(meno possibile|evit|meglio non|raramente|poco)/.test(t))[6,0].forEach(i=>rules.push({kind:'avoid_weekday',weekday:i,weight:3}));
   const rest=sh.filter(x=>!counted.has(x.code)).map(x=>x.code);
   const dayWord=/di giorno|turni diurni|diurn/.test(t);
   if(/\bsolo\b|soltanto|esclusivamente/.test(t)&&rest.length)rules.push({kind:'only_shifts',shift_codes:[...new Set(rest)],weight:3});
@@ -960,6 +963,9 @@ V.regole=()=>{const M=isMgr(),teams=editableTeams();
   <button class="link" style="padding-left:0" data-act="addshift" data-v="${dp.id}">+ Aggiungi un turno</button></div>`).join('')}
   ${M?`<div class="card"><h3>Vincoli</h3><div class="two"><label class="f">Riposo minimo tra due turni (ore)<input type="number" id="r-rest" min="0" max="24" value="${rules().minRest}"></label><label class="f">Massimo giorni di fila (normale)<input type="number" id="r-consec" min="1" max="14" value="${rules().maxConsec}"></label><label class="f">Massimo in casi eccezionali<input type="number" id="r-consecx" min="1" max="14" value="${exCap()}"></label>
   <label class="f">Riposi a settimana<input type="number" id="r-rpw" min="0" max="4" value="${rules().restPerWeek}"></label><label class="f">Giorni liberi dopo le notti<input type="number" id="r-night" min="0" max="4" value="${restN()}"></label><label class="f">Colleghi da contattare per richiesta<input type="number" id="r-send" min="1" max="10" value="${rules().sendTo}"></label></div>
+  <h3 style="margin-top:8px">Comodità dei turni</h3>
+  <div class="two"><label class="f">Riposi di fila almeno una volta al mese<input type="number" id="r-block" min="0" max="7" value="${rules().restBlock??3}"></label><label class="f">Weekend liberi al mese (almeno)<input type="number" id="r-wkfree" min="0" max="2" value="${rules().freeWeekends??1}"></label></div>
+  <div class="toggle"><input type="checkbox" id="r-single" ${rules().noSingleDays!==false?'checked':''}><label for="r-single">Niente giorni di lavoro isolati (salvo eventi)</label></div>
   <button class="primary" data-act="saverules">Salva le regole</button><p class="muted">Le nuove regole valgono per i prossimi turni generati e per i prossimi scambi.</p></div>
   <div class="card"><h3>Nuovo team</h3><div class="row"><input id="n-dep" class="grow" style="width:auto" placeholder="Es. Housekeeping"><button class="ghost" data-act="adddept">Aggiungi</button></div></div>`:''}`};
 
@@ -985,9 +991,9 @@ Object.assign(A,{
   ruledel(v){confirmBox('Eliminare questa regola?','Elimina',async()=>{try{await api('delete_rule',{rule_id:v});await loadPerso()}catch(e){toast(e.message)}},true)},
   notedel(v){confirmBox('Eliminare questa nota? Le regole già create restano finché non le elimini.','Elimina',async()=>{try{await api('delete_note',{note_id:v});await loadPerso()}catch(e){toast(e.message)}},true)},
   ruleadd(v){const m=mem(v),sh=shiftsOf(m.department_id);
-    modal(`<h3>Regola per ${h(m.name)}</h3><label class="f">Tipo<select id="ra-kind"><option value="avoid_shift">Evitare un turno</option><option value="prefer_shift">Preferire un turno</option><option value="only_shifts">Solo questo turno</option><option value="max_per_month">Massimo al mese</option><option value="unavailable_weekday">Mai in questo giorno</option><option value="avoid_weekday">Evitare questo giorno</option></select></label>
+    modal(`<h3>Regola per ${h(m.name)}</h3><label class="f">Tipo<select id="ra-kind"><option value="avoid_shift">Evitare un turno</option><option value="prefer_shift">Preferire un turno</option><option value="only_shifts">Solo questo turno</option><option value="max_per_month">Massimo al mese</option><option value="unavailable_weekday">Mai in questo giorno</option><option value="avoid_weekday">Evitare questo giorno</option><option value="max_weekends_per_month">Massimo weekend al mese</option></select></label>
     <div class="two"><label class="f">Turno<select id="ra-shift">${sh.map(s=>`<option value="${s.code}">${h(s.name)}</option>`).join('')}</select></label><label class="f">Giorno<select id="ra-wd">${WD.map((d,i)=>`<option value="${i}">${d}</option>`).join('')}</select></label>
-    <label class="f">Quanti al mese<input type="number" id="ra-val" min="0" max="31" value="2"></label><label class="f">Priorità<select id="ra-w"><option value="1">Bassa</option><option value="2" selected>Media</option><option value="3">Alta</option></select></label></div>`,
+    <label class="f">Quanti al mese (turni o weekend)<input type="number" id="ra-val" min="0" max="31" value="2"></label><label class="f">Priorità<select id="ra-w"><option value="1">Bassa</option><option value="2" selected>Media</option><option value="3">Alta</option></select></label></div>`,
     `<button class="ghost" data-act="mclose">Annulla</button><button class="primary" data-act="ruleaddok" data-v="${v}">Aggiungi</button>`)},
   async ruleaddok(v){const g=id=>document.getElementById(id).value,m=mem(v);const r={kind:g('ra-kind'),shift_code:g('ra-shift'),shift_codes:[g('ra-shift')],weekday:+g('ra-wd'),value:+g('ra-val'),weight:+g('ra-w')};r.label=ruleLabel(r,m.department_id);
     closeModal();try{await api('add_note',{member_id:v,text:'',rules:[r]});toast('Regola aggiunta');await loadPerso()}catch(e){toast(e.message)}},
