@@ -332,13 +332,15 @@ function showFatal(msg){
   app.innerHTML=`<div class="auth"><div class="hero"><h1 style="font-size:30px">Qualcosa non è partito</h1><p>${String(msg||'Errore sconosciuto').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</p><p style="font-size:13px;opacity:.7">Passaggio: ${BOOT.step}</p></div>
   <div class="card" style="display:grid;gap:10px"><button class="primary" onclick="location.reload()">Riprova</button><button class="ghost" onclick="hardLogout()">Esci e rientra</button></div></div>`;
 }
-function hardLogout(){try{Object.keys(localStorage).filter(k=>k.startsWith('sb-')).forEach(k=>localStorage.removeItem(k))}catch(e){}location.href=location.pathname}
+function hardLogout(){try{Object.keys(localStorage).filter(k=>k.startsWith('sb-')||k.startsWith('turnario:')).forEach(k=>localStorage.removeItem(k))}catch(e){}
+  const go=()=>{location.href=location.pathname};
+  try{Promise.all([navigator.serviceWorker?navigator.serviceWorker.getRegistrations().then(rs=>Promise.all(rs.map(r=>r.unregister()))):0,window.caches?caches.keys().then(ks=>Promise.all(ks.map(k=>caches.delete(k)))):0]).finally(go);setTimeout(go,1500)}catch(e){go()}}
 window.addEventListener('error',e=>{if(!BOOT.done)showFatal(e.message)});
 window.addEventListener('unhandledrejection',e=>{if(!BOOT.done)showFatal((e.reason&&e.reason.message)||String(e.reason))});
 setTimeout(()=>{if(!BOOT.done)showFatal('Il caricamento non si è completato. Controlla la connessione e riprova.')},15000);
 if(!window.supabase)throw new Error('Non riesco a caricare i componenti del sito. Controlla la connessione e riprova.');
 // lock disattivato: su Safari per iPhone il lock del browser a volte blocca l'accesso all'avvio
-const sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false,lock:async(_n,_t,fn)=>await fn(),experimental:{passkey:true}}});
+const sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false,experimental:{passkey:true}}});
 
 const MESI=['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
 const GG=['Dom','Lun','Mar','Mer','Gio','Ven','Sab'];
@@ -812,7 +814,15 @@ document.addEventListener('submit',async ev=>{
 
 /* ===== avvio ===== */
 // parte solo quando TUTTO il codice della pagina è caricato (su iPhone l'accesso può rispondere prima)
-function startAuth(){sb.auth.onAuthStateChange((evt,s)=>{
+function startAuth(){let fired=false;BOOT.step='sessione';
+  // paracadute: se la sessione salvata non risponde, riparto dalla pagina di accesso invece di restare bloccato
+  setTimeout(async()=>{if(fired||BOOT.done)return;BOOT.step='sessione (verifica)';
+    const r=await Promise.race([sb.auth.getSession().then(x=>x.data.session).catch(()=>null),new Promise(res=>setTimeout(()=>res('timeout'),4000))]);
+    if(fired||BOOT.done)return;
+    if(r&&r!=='timeout'){fired=true;session=r;BOOT.step='accesso';try{await loadAll();subscribe();render()}catch(e){if(D)render();else showFatal(e.message)}return}
+    try{Object.keys(localStorage).filter(k=>k.startsWith('sb-')).forEach(k=>localStorage.removeItem(k))}catch(_){}
+    session=null;ui.err=r==='timeout'?'La sessione salvata non rispondeva: accedi di nuovo.':'';ui.view=location.hash==='#sviluppatore'?'devboot':'login';render()},5000);
+  sb.auth.onAuthStateChange((evt,s)=>{fired=true;
   const was=session&&session.user.id;session=s;
   if(s&&(evt==='SIGNED_IN'||evt==='INITIAL_SESSION')&&was!==s.user.id){
     BOOT.step='accesso';setTimeout(async()=>{try{await loadAll();subscribe();render()}catch(e){console.error(e);if(D)render();else showFatal(e.message)}},0);
