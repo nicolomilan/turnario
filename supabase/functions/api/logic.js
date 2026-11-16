@@ -161,7 +161,14 @@ export function comfortViolations(seq, rules, dow, pre = []) {
 }
 
 // Genera i turni di un reparto per un mese. Ritorna { seq, skillSeq, score, uncovered, exceptions, isolated }
-export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skills = {}, needs = [], memberRules = {}, dow = () => -1, dayAdjust = () => [] }) {
+// fixed: { id: { giorno: {code, skill} } } celle che non si toccano (bloccate, già passate, altre persone)
+// history: { id: {nights, weekends, holidays} } lavorati negli ultimi 12 mesi → equità nel tempo
+// holidays: giorni festivi del mese; current: turni attuali (per "meno cambi"); weights: {fair, comfort, stable}
+export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skills = {}, needs = [], memberRules = {}, dow = () => -1, dayAdjust = () => [], fixed = {}, history = {}, holidays = [], current = null, weights = {} }) {
+  const wf = weights.fair ?? 1, wc = weights.comfort ?? 1, ws = weights.stable ?? 0;
+  const hol = new Set(holidays);
+  const isWE = (md) => dow(md) === 0 || dow(md) === 6;
+  const fx = (e, md) => (fixed[e] ? fixed[e][md] : undefined);
   const R = rng(seed), T = targetDays(n, rules), emps = memberIds;
   const seq = {}, sk = {}, w = {}, consec = {}, cnt = {}, wkw = {};
   const P = CTX_DAYS; // i primi P giorni sono la coda del mese precedente
@@ -179,6 +186,9 @@ export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skil
   const nights = nightCodes(shifts), kN = restAfterNight(rules);
   const eventDay = (md) => dayAdjust(md).some((a) => a.delta > 0);
   const known = dow(0) >= 0;
+  const hv = (e, k) => ((history[e] || {})[k] || 0);
+  const havg = (k) => emps.reduce((a, e) => a + hv(e, k), 0) / (emps.length || 1);
+  const HA = { nights: havg('nights'), weekends: havg('weekends'), holidays: havg('holidays') };
   // --- riposi protetti: a ognuno un weekend libero, allungato a un blocco di 3 giorni (ven-dom o sab-lun)
   const wk = known ? weekendsOf(n, dow) : [];
   const weekIdx = {}; wk.forEach(([a, b], i) => { weekIdx[a] = i; weekIdx[b] = i; });
@@ -190,8 +200,8 @@ export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skil
     const off = Math.floor(R() * order.length);
     byskill.forEach((e, i) => {
       const [sa, su] = wk[order[(i + off) % order.length]];
-      [sa, su].forEach((d) => prot[e].add(d));
-      if ((rules.restBlock || 0) >= 3) { const ext = (i % 2 === 0 && sa > 0) || su >= n - 1 ? sa - 1 : su + 1; if (ext >= 0 && ext < n) prot[e].add(ext); }
+      [sa, su].forEach((d) => { if (!fx(e, d) || fx(e, d).code === 'R') prot[e].add(d); });
+      if ((rules.restBlock || 0) >= 3) { const ext = (i % 2 === 0 && sa > 0) || su >= n - 1 ? sa - 1 : su + 1; if (ext >= 0 && ext < n && (!fx(e, ext) || fx(e, ext).code === 'R')) prot[e].add(ext); }
     });
   }
   // vincoli rigidi personali
@@ -210,7 +220,15 @@ export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skil
   let unc = 0;
   for (let d = P; d < P + n; d++) {
     const md = d - P, used = new Set();
-    const slots = applyAdjust(slotsFor(shifts, needs, dow(md)), dayAdjust(md)).sort((a, b) => rarity(a.skill) - rarity(b.skill) || start[b.code] - start[a.code]);
+    const slots = applyAdjust(slotsFor(shifts, needs, dow(md)), dayAdjust(md)).map((x) => ({ ...x })).sort((a, b) => rarity(a.skill) - rarity(b.skill) || start[b.code] - start[a.code]);
+    // celle fisse: occupano il loro posto e tolgono la persona dai candidati
+    for (const e of emps) {
+      const f = fx(e, md); if (!f) continue;
+      used.add(e); if (f.code === 'R') continue;
+      seq[e][d] = f.code; sk[e][md] = f.skill || null; w[e]++; cnt[e][f.code] = (cnt[e][f.code] || 0) + 1; if (md in weekIdx) wkw[e].add(weekIdx[md]);
+      const sl = slots.find((x) => x.need > 0 && x.code === f.code && (x.skill || null) === (f.skill || null)) || slots.find((x) => x.need > 0 && x.code === f.code && (!x.skill || !f.skill));
+      if (sl) sl.need--;
+    }
     for (const sl of slots) {
       const avg = emps.reduce((a, x) => a + cnt[x][sl.code], 0) / (emps.length || 1);
       for (let k = 0; k < sl.need; k++) {
@@ -228,11 +246,17 @@ export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skil
             if (prev === sl.code) s -= nights.has(sl.code) ? 9 : 4; // serie di notti più lunghe = meno riposi sprecati
             if (prev === 'R') s += prev2 !== 'R' ? 3 : -1;
             // comodità: chi ha appena iniziato una serie la continua (niente giorni isolati)
-            if (rules.noSingleDays !== false && consec[e] === 1) s -= 6;
+            if (rules.noSingleDays !== false && consec[e] === 1) s -= 6 * wc;
             // comodità: non richiamare chi domani è in riposo protetto per un giorno solo
             if (rules.noSingleDays !== false && prev === 'R' && prot[e].has(md + 1)) s += 8;
             if (sl.skill !== 'manager' && has(e, 'manager')) s += 3; // il manager resta libero per i posti da manager
             s += softCost(sl.code, md, memberRules[e], dow);
+            // equità nel tempo: chi ha fatto più notti/weekend/festivi negli ultimi mesi ne riceve meno
+            if (nights.has(sl.code)) s += (hv(e, 'nights') - HA.nights) * 0.5 * wf;
+            if (isWE(md)) s += (hv(e, 'weekends') - HA.weekends) * 0.6 * wf;
+            if (hol.has(md)) s += (hv(e, 'holidays') - HA.holidays) * 2 * wf + 1;
+            // meno cambi: preferisco lasciare il turno a chi lo ha già
+            if (ws && current && current[e]) s -= current[e][md] === sl.code ? 6 * ws : 0;
             if (useProt && prot[e].has(md)) s += 50;
             if (s < bs) { bs = s; best = e; }
           }
@@ -248,9 +272,9 @@ export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skil
     const runLen = (e, d) => { let a = d, b = d; while (a - 1 >= 0 && seq[e][a - 1] !== 'R') a--; while (b + 1 < P + n && seq[e][b + 1] !== 'R') b++; return b - a + 1; };
     for (let pass = 0; pass < 2; pass++) for (let d = P; d < P + n; d++) for (const e of emps) {
       const c = seq[e][d], md = d - P;
-      if (c === 'R' || seq[e][d - 1] !== 'R' || (d + 1 < P + n && seq[e][d + 1] !== 'R') || eventDay(md)) continue;
+      if (c === 'R' || seq[e][d - 1] !== 'R' || (d + 1 < P + n && seq[e][d + 1] !== 'R') || eventDay(md) || fx(e, md)) continue;
       for (const f of emps) {
-        if (f === e || seq[f][d] !== 'R' || !has(f, sk[e][md]) || prot[f].has(md)) continue;
+        if (f === e || seq[f][d] !== 'R' || !has(f, sk[e][md]) || prot[f].has(md) || fx(f, md)) continue;
         if (!(seq[f][d - 1] !== 'R' || (d + 1 < P + n && seq[f][d + 1] !== 'R'))) continue; // deve allungare una serie
         if (w[f] >= T + 1) continue;
         const save = [...seq[f]]; seq[f][d] = c;
@@ -270,17 +294,24 @@ export function generateDept({ shifts, memberIds, n, rules, seed, pre = {}, skil
     soft += seqSoft(seq[e], memberRules[e] || [], dow);
     if (known) { iso += comfortStats(seq[e], dow, tail).isolated; comfort += comfortViolations(seq[e], rules, dow, tail); }
   });
-  let score = unc * 1000 + exc * 40 + soft + iso * 25 + comfort * 60;
+  let changes = 0;
+  if (current) emps.forEach((e) => { if (current[e]) seq[e].forEach((c, d) => { if ((current[e][d] || 'R') !== c) changes++; }); });
+  // equità: weekend e festivi lavorati, sommati allo storico; poi turni dello stesso tipo
+  const variance = (a) => { const m = a.reduce((x, y) => x + y, 0) / (a.length || 1); return a.reduce((x, y) => x + (y - m) ** 2, 0); };
+  const tot = (e, k, f) => hv(e, k) + seq[e].filter((c, d) => c !== 'R' && f(d)).length;
+  let fair = variance(emps.map((e) => tot(e, 'weekends', isWE))) * 3 + variance(emps.map((e) => tot(e, 'holidays', (d) => hol.has(d)))) * 6;
+  shifts.forEach((sh) => { fair += variance(emps.map((e) => cnt[e][sh.code] + (nights.has(sh.code) ? hv(e, 'nights') : 0))); });
+  let base = 0;
   emps.forEach((e) => {
-    score += (w[e] - T) ** 2 * 5;
-    for (let d = 1; d < n - 1; d++) if (seq[e][d] === 'R' && seq[e][d - 1] !== 'R' && seq[e][d + 1] !== 'R') score += 2;
+    base += (w[e] - T) ** 2 * 5;
+    for (let d = 1; d < n - 1; d++) if (seq[e][d] === 'R' && seq[e][d - 1] !== 'R' && seq[e][d + 1] !== 'R') base += 2;
   });
-  shifts.forEach((sh) => {
-    const a = emps.map((e) => cnt[e][sh.code]);
-    const m = a.reduce((x, y) => x + y, 0) / (a.length || 1);
-    score += a.reduce((x, y) => x + (y - m) ** 2, 0);
-  });
-  return { seq, skillSeq: sk, score, uncovered: unc, exceptions: exc, isolated: iso, comfortMisses: comfort };
+  const parts = { unc, exc, soft, iso, comfort, changes, fair, base };
+  return { seq, skillSeq: sk, score: scoreOf(parts, weights), parts, uncovered: unc, exceptions: exc, isolated: iso, comfortMisses: comfort, changes };
+}
+export function scoreOf(p, weights = {}) {
+  const wf = weights.fair ?? 1, wc = weights.comfort ?? 1, ws = weights.stable ?? 0;
+  return p.unc * 1000 + p.exc * 40 + p.soft + (p.iso * 25 + p.comfort * 60) * wc + p.changes * 3 * ws + p.fair * wf + p.base;
 }
 
 export function bestSchedule(opts, tries = 60) {
@@ -290,6 +321,59 @@ export function bestSchedule(opts, tries = 60) {
     if (!best || r.score < best.score) best = r;
   }
   return best;
+}
+
+// Tre versioni del piano con pesi diversi: la direzione sceglie quella che preferisce
+export function planVariants(opts, tries = 40) {
+  const hasCur = !!opts.current && Object.values(opts.current).some((s) => s.some((c) => c !== 'R'));
+  const V = [
+    { key: 'bal', label: 'Equilibrato', hint: 'Il miglior compromesso tra equità e comodità', weights: { fair: 1, comfort: 1, stable: hasCur ? 0.3 : 0 } },
+    { key: 'comfort', label: 'Più comodo', hint: 'Serie lunghe e riposi di fila, anche a costo di un po\' di equità', weights: { fair: 0.5, comfort: 2.5, stable: 0 } },
+    hasCur ? { key: 'stable', label: 'Meno cambi', hint: 'Cambia il meno possibile rispetto ai turni attuali', weights: { fair: 0.7, comfort: 0.8, stable: 4 } }
+      : { key: 'fair', label: 'Più equo', hint: 'Notti, weekend e festivi divisi nel modo più uniforme', weights: { fair: 3, comfort: 0.7, stable: 0 } },
+  ];
+  // un'unica raccolta di piani (generati con i tre pesi), poi ogni versione sceglie il migliore secondo i suoi pesi
+  const pool = [];
+  V.forEach((v, i) => { for (let s = 1; s <= tries; s++) pool.push(generateDept({ ...opts, weights: v.weights, seed: s * 7919 + (opts.seedBase || 0) + i * 101 })); });
+  const taken = new Set();
+  const out = [];
+  // prima le versioni "specializzate", poi l'equilibrata: così ognuna ha davvero il suo piano migliore
+  [2, 1, 0].forEach((k) => {
+    const v = V[k], order = pool.map((r, i) => [scoreOf(r.parts, v.weights), i]).sort((a, b) => a[0] - b[0]);
+    const pick = (order.find(([, i]) => !taken.has(i)) || order[0])[1]; taken.add(pick);
+    out[k] = { ...v, result: pool[pick] };
+  });
+  return out;
+}
+// numeri per confrontare le versioni
+export function planMetrics(r, ids, shifts, dow, holidays = [], history = {}) {
+  const nights = nightCodes(shifts), hol = new Set(holidays), hv = (e, k) => ((history[e] || {})[k] || 0);
+  // differenza tra chi ne fa di più e chi di meno, contando anche gli ultimi 12 mesi
+  const cnt = (f, k) => ids.map((e) => hv(e, k) + r.seq[e].filter((c, d) => c !== 'R' && f(c, d)).length);
+  const spread = (a) => (a.length ? Math.max(...a) - Math.min(...a) : 0);
+  return {
+    uncovered: r.uncovered, isolated: r.isolated, comfortMisses: r.comfortMisses, exceptions: r.exceptions, changes: r.changes || 0,
+    nightsSpread: spread(cnt((c) => nights.has(c), 'nights')), weekendSpread: spread(cnt((c, d) => dow(d) === 0 || dow(d) === 6, 'weekends')), holidaySpread: spread(cnt((c, d) => hol.has(d), 'holidays')),
+  };
+}
+
+// Festività nazionali italiane (con Pasqua e Pasquetta)
+export function easter(y) {
+  const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  return [Math.floor((h + l - 7 * m + 114) / 31), ((h + l - 7 * m + 114) % 31) + 1]; // [mese 1-12, giorno]
+}
+export function italianHolidays(y) {
+  const out = { '01-01': 'Capodanno', '01-06': 'Epifania', '04-25': 'Liberazione', '05-01': 'Festa dei lavoratori', '06-02': 'Festa della Repubblica', '08-15': 'Ferragosto', '11-01': 'Ognissanti', '12-08': 'Immacolata', '12-25': 'Natale', '12-26': 'Santo Stefano' };
+  const [em, ed] = easter(y); const p = (x) => String(x).padStart(2, '0');
+  out[`${p(em)}-${p(ed)}`] = 'Pasqua';
+  const t = new Date(Date.UTC(y, em - 1, ed + 1)); out[`${p(t.getUTCMonth() + 1)}-${p(t.getUTCDate())}`] = 'Pasquetta';
+  return out;
+}
+// indici (0-based) dei festivi in un mese 'YYYY-MM'
+export function holidaysOfMonth(month) {
+  const [y, m] = month.split('-').map(Number), H = italianHolidays(y), pre = String(m).padStart(2, '0') + '-';
+  return Object.keys(H).filter((k) => k.startsWith(pre)).map((k) => Number(k.slice(3)) - 1).sort((a, b) => a - b);
 }
 
 // Trova i colleghi che possono coprire il giorno d del richiedente a.

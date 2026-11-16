@@ -360,6 +360,13 @@ const inMonth=s=>s&&s.slice(0,7)===ui.month;
 const dowOf=s=>new Date(s+'T12:00:00').getDay();
 const dow=d=>dowOf(dateOf(d));
 const isWe=d=>{const w=dow(d);return w===0||w===6};
+// festività italiane (Pasqua compresa): contano come weekend per l'equità
+function easterOf(y){const a=y%19,b=Math.floor(y/100),c=y%100,d=Math.floor(b/4),e=b%4,f=Math.floor((b+8)/25),g=Math.floor((b-f+1)/3),hh=(19*a+b-d-g+15)%30,i=Math.floor(c/4),k=c%4,l=(32+2*e+2*i-hh-k)%7,m=Math.floor((a+11*hh+22*l)/451);return[Math.floor((hh+l-7*m+114)/31),((hh+l-7*m+114)%31)+1]}
+const HOLC={};
+function holidaysOfYear(y){if(HOLC[y])return HOLC[y];const o={'01-01':'Capodanno','01-06':'Epifania','04-25':'Liberazione','05-01':'Festa dei lavoratori','06-02':'Festa della Repubblica','08-15':'Ferragosto','11-01':'Ognissanti','12-08':'Immacolata','12-25':'Natale','12-26':'Santo Stefano'};
+  const[em,ed]=easterOf(y),p2=x=>String(x).padStart(2,'0');o[`${p2(em)}-${p2(ed)}`]='Pasqua';const t=new Date(Date.UTC(y,em-1,ed+1));o[`${p2(t.getUTCMonth()+1)}-${p2(t.getUTCDate())}`]='Pasquetta';return HOLC[y]=o}
+const holidayName=ds=>holidaysOfYear(+ds.slice(0,4))[ds.slice(5)]||'';
+const isHol=d=>!!holidayName(dateOf(d));
 const fmtS=s=>`${GG[dowOf(s)]} ${Number(s.slice(8,10))} ${MESI[Number(s.slice(5,7))-1].slice(0,3).toLowerCase()}`;
 const fmt=d=>fmtS(dateOf(d));
 const mem=id=>D.members.find(m=>m.id===id);
@@ -379,6 +386,9 @@ const myTeams=()=>D?D.departments.filter(d=>d.scheduler_id===D.me.id||d.deputy_i
 const editableTeams=()=>isMgr()?D.departments:myTeams();
 const canEditTeam=depId=>editableTeams().some(d=>d.id===depId);
 const canEditMember=id=>{const m=mem(id);return !!m&&canEditTeam(m.department_id)};
+// pubblicazione: un mese in bozza lo vedono solo la direzione e chi fa i turni del team
+const isPublished=(depId,month=ui.month)=>(D.pubs||[]).some(p=>p.department_id===depId&&p.month.slice(0,7)===month);
+const isLocked=(id,d)=>D.locks&&D.locks.has(id+'|'+dateOf(d));
 const initials=n=>n.split(' ').map(x=>x[0]).slice(0,2).join('').toUpperCase();
 const AVC=['#1F4E46','#9A3412','#1E40AF','#6D28D9','#0E7490','#A21CAF','#4D7C0F','#B45309'];
 const avColor=id=>{let x=0;for(const c of String(id))x=(x*31+c.charCodeAt(0))|0;return AVC[Math.abs(x)%AVC.length]};
@@ -430,16 +440,21 @@ async function loadAll(){
     const ms=months.map(x=>x.month.slice(0,7));
     if(!ui.month){const cur=todayStr().slice(0,7);ui.month=ms.includes(cur)?cur:(ms.find(m=>m>cur)||ms[ms.length-1]||(isMgrRole(me)?monthAdd(cur,1):cur))}
     const from=`${ui.month}-01`,to=`${ui.month}-${pad(new Date(+ui.month.slice(0,4),+ui.month.slice(5,7),0).getDate())}`;
-    const [assignments,days,offers,notifs,log,events]=await Promise.all([
+    const [assignments0,days,offers,notifs,log,events,pubs,locks]=await Promise.all([
       sel(sb.from('assignments').select('member_id,day,code,skill').eq('business_id',b).gte('day',addD(from,-7)).lte('day',addD(to,7))),
       sel(sb.from('request_days').select('*').eq('business_id',b).gte('day',from).lte('day',to)),
       sel(sb.from('offers').select('*').eq('business_id',b).or(`and(day.gte.${from},day.lte.${to}),status.eq.pending`)),
       sel(sb.from('notifications').select('*').eq('member_id',me.id).order('created_at',{ascending:false}).limit(30)),
       (me.role==='manager'||departments.some(d=>d.scheduler_id===me.id||d.deputy_id===me.id))?sel(sb.from('audit_log').select('*').eq('business_id',b).order('created_at',{ascending:false}).limit(30)):Promise.resolve([]),
-      sel(sb.from('events').select('*').eq('business_id',b).lte('date_from',to).gte('date_to',from).order('date_from'))]);
+      sel(sb.from('events').select('*').eq('business_id',b).lte('date_from',to).gte('date_to',from).order('date_from')),
+      sel(sb.from('publications').select('department_id,month').eq('business_id',b)),
+      sel(sb.from('cell_locks').select('member_id,day').eq('business_id',b).gte('day',from).lte('day',to))]);
     const reqIds=[...new Set(days.map(x=>x.request_id).concat(offers.map(o=>o.request_id)))];
     const requests=reqIds.length?await sel(sb.from('requests').select('*').in('id',reqIds).order('created_at',{ascending:false})):[];
-    D={me,business,departments,shifts,members,months:ms,assignments,days,offers,notifs,log,requests,needs,events};
+    D={me,business,departments,shifts,members,months:ms,assignments:assignments0,days,offers,notifs,log,requests,needs,events,pubs,locks:new Set(locks.map(l=>l.member_id+'|'+l.day))};
+    // (serve per "Vedi come": il server già nasconde le bozze a chi non fa i turni)
+    D.assignments=assignments0.filter(a=>{const m=mem(a.member_id);return !m||canEditTeam(m.department_id)||isPublished(m.department_id,a.day.slice(0,7))});
+    if(ui.preview&&ui.preview.month!==ui.month)ui.preview=null;
     if(!ui.dept||!dept(ui.dept)||!canEditTeam(ui.dept))ui.dept=(editableTeams()[0]||departments[0]||{}).id;
     ui.view='app';
   }finally{busy(false)}
@@ -543,7 +558,7 @@ function dayTag(id,d){
 }
 function shiftPill(depId,c){if(c==='R')return'<span class="rest">Riposo</span>';const s=sdef(depId,c);if(!s)return`<span class="pill" style="background:#888">${h(c)}</span>`;return`<span class="pill" style="background:${s.color}">${h(s.name)}</span><small>${s.start_time}–${s.end_time}</small>`}
 function monthPicker(id,list){return`<select id="${id}" style="width:auto">${list.map(m=>`<option value="${m}" ${m===ui.month?'selected':''}>${monthLabel(m)}${D.months.includes(m)?'':' (da generare)'}</option>`).join('')}</select>`}
-function notGenerated(){return!D.months.includes(ui.month)}
+function notGenerated(dep){dep=dep===undefined?D.me.department_id:dep;return!D.months.includes(ui.month)||(!!dep&&!canEditTeam(dep)&&!isPublished(dep))}
 V.mese=()=>{
   const me=D.me;
   if(!me.department_id)return`<h2>Il mio mese</h2><div class="card empty">Non sei assegnato a un reparto. Chiedi al responsabile.</div>`;
@@ -627,11 +642,11 @@ function grid(depId,{editable=false,meId=null}={}){
   const n=daysIn(),emps=employees(depId),days=[...Array(n).keys()],sh=shiftsOf(depId);
   if(!emps.length)return'<div class="card empty">Nessuna persona in questo reparto.</div>';
   const evs=days.map(d=>eventsOn(dateOf(d)));
-  const head=`<tr><th class="sticky">${h((dept(depId)||{}).name)}</th>${days.map(d=>`<th class="${isWe(d)?'we':''}">${GG[dow(d)][0]}<br>${d+1}</th>`).join('')}<th>Gg</th></tr>`
+  const head=`<tr><th class="sticky">${h((dept(depId)||{}).name)}</th>${days.map(d=>`<th class="${isWe(d)?'we':''} ${isHol(d)?'hol':''}" ${isHol(d)?`title="${h(holidayName(dateOf(d)))}"`:''}>${GG[dow(d)][0]}<br>${d+1}</th>`).join('')}<th>Gg</th></tr>`
     +(evs.some(x=>x.length)?`<tr class="evrow"><td class="sticky">Eventi</td>${evs.map((x,d)=>x.length?`<td class="ev-${x.some(e=>e.impact==='busy')?'busy':x.some(e=>e.impact==='quiet')?'quiet':'info'}" data-act="evday" data-v="${dateOf(d)}" title="${h(x.map(e=>e.name).join(', '))}"><span></span></td>`:'<td></td>').join('')}<td></td></tr>`:'');
   const rows=emps.map(e=>{const seq=seqOf(e.id),vf=violFlagsCtx(e.id,depId),sf=softFlagsCtx(e.id);
     return`<tr class="${e.id===meId?'me':''}"><td class="sticky">${h(e.name)}</td>${seq.map((c,d)=>{const s=sdef(depId,c);
-      return`<td class="c ${c==='R'?'R':''} ${editable?'edit':''} ${vf[d]?'viol':sf[d]?'exc':''} ${c==='R'&&isWe(d)?'we':''}" ${s?`style="--c:${s.color}"`:''} ${editable?`data-act="cell" data-v="${e.id}|${d}"`:''}><span>${c==='R'?'·':h(c)}</span></td>`}).join('')}<td><b>${seq.filter(x=>x!=='R').length}</b></td></tr>`}).join('');
+      return`<td class="c ${c==='R'?'R':''} ${editable?'edit':''} ${vf[d]?'viol':sf[d]?'exc':''} ${c==='R'&&isWe(d)?'we':''}" ${s?`style="--c:${s.color}"`:''} ${editable?`data-act="cell" data-v="${e.id}|${d}"`:''}><span>${c==='R'?'·':h(c)}</span>${editable&&isLocked(e.id,d)?'<i class="lk"></i>':''}</td>`}).join('')}<td><b>${seq.filter(x=>x!=='R').length}</b></td></tr>`}).join('');
   const cov=covRows(depId,emps,days).map(r=>`<tr class="cov"><td class="sticky">${h(r.label)}</td>${r.cells.map(c=>c?`<td class="${c.k<c.need?'short':''}">${c.k}/${c.need}</td>`:'<td>–</td>').join('')}<td></td></tr>`).join('');
   return`<div class="gridwrap"><table class="grid"><thead>${head}</thead><tbody>${rows}${cov}</tbody></table></div>
   <div class="legend">${sh.map(s=>`<span class="chip"><i style="background:${s.color}"></i><b>${h(s.code)}</b> ${h(s.name)} ${s.start_time}–${s.end_time}</span>`).join('')}<span class="chip">· Riposo</span></div>`;
@@ -1252,5 +1267,146 @@ Object.assign(A,{
   oggimove(v){const n=ui.oggiD+ +v;if(n<0||n>=daysIn()){ui.month=monthAdd(ui.month,+v);ui.oggiD=+v>0?0:null;loadAll().then(()=>{if(ui.oggiD==null)ui.oggiD=daysIn()-1;render()}).catch(e=>toast(e.message));return}ui.oggiD=n;render()}
 });
 </script>
+<script>
+/* ===== Planning: versioni del piano, rigenerazione parziale, lucchetti, pubblicazione, storico, equità ===== */
+(function(){const st=document.createElement('style');st.textContent=`
+.grid th.hol{color:var(--bad);text-decoration:underline dotted}
+.grid td.c{position:relative}
+.grid td.c i.lk{position:absolute;top:2px;right:2px;width:11px;height:11px;border-radius:50%;background:var(--text,#111) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3'%3E%3Crect x='6' y='11' width='12' height='9' rx='2'/%3E%3Cpath d='M9 11V8a3 3 0 0 1 6 0v3'/%3E%3C/svg%3E") center/8px no-repeat;opacity:.85}
+.pubbar{display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap;padding:12px 14px;border-radius:16px;margin:0 0 12px}
+.pubbar.draft{background:var(--warn-soft)}.pubbar.pub{background:var(--ok-soft)}
+.pubbar b{display:block}.pubbar small{color:var(--muted)}
+.prevbar{position:sticky;top:8px;z-index:5;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 12px;border-radius:16px;margin:0 0 12px;background:var(--accent-soft);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+.prevbar .grow{flex:1;min-width:140px}
+.vcard{border-radius:18px;padding:14px;margin:0 0 10px;background:var(--card,rgba(255,255,255,.6));border:1px solid var(--line,rgba(0,0,0,.08))}
+.vcard.on{outline:2px solid var(--accent)}
+.vcard h4{margin:0 0 2px;font-size:17px}.vcard p{margin:0 0 10px;color:var(--muted);font-size:13px}
+.mets{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:10px}
+.mets div{background:var(--accent-soft);border-radius:12px;padding:7px 8px;font-size:11px;color:var(--muted);line-height:1.2}
+.mets div b{display:block;font-size:17px;color:var(--text,inherit)}
+.mets div.bad b{color:var(--bad)}.mets div.best{outline:1.5px solid var(--ok)}
+.hist{padding:10px 0;border-bottom:1px solid var(--line,rgba(0,0,0,.08))}.hist:last-child{border:0}
+.hist .row{justify-content:space-between;align-items:center}.hist small{color:var(--muted)}
+.hist .it{font-size:13px;color:var(--muted);margin-top:4px}
+.hist.undone{opacity:.5}
+.plist{max-height:220px;overflow:auto;margin:6px 0 10px}
+.plist label{display:flex;gap:10px;align-items:center;padding:6px 2px;font-weight:500}
+.plist input{width:auto}
+`;document.head.appendChild(st)})();
+
+const SRC={piano:'Piano applicato',manuale:'Modifica manuale',scambio:'Scambio accettato',copertura:'Copertura accettata',annulla:'Annullamento',sistema:'Sistema'};
+function teamMembersOf(depIds){return D.members.filter(m=>m.active&&depIds.includes(m.department_id)).map(m=>m.id)}
+function previewAssignments(){
+  const P=ui.preview,ids=new Set(P.memberIds),v=P.variants.find(x=>x.key===P.key);
+  const keep=D.assignments.filter(a=>!(ids.has(a.member_id)&&inMonth(a.day)));
+  return keep.concat(v.rows.map(([id,d,c,sk])=>({member_id:id,day:dateOf(d),code:c,skill:sk})));
+}
+function withPreview(fn){if(!ui.preview)return fn();const save=D.assignments;D.assignments=previewAssignments();try{return fn()}finally{D.assignments=save}}
+
+V.turni=()=>{
+  if(!D.departments.length)return`<h2>Planning turni</h2><div class="card empty">Crea prima un team in Regole.</div>`;
+  const cur=todayStr().slice(0,7);const list=[...new Set([...D.months,...[0,1,2,3,4,5].map(k=>monthAdd(cur,k))])].sort();
+  const teams=editableTeams();if(!teams.length)return`<h2>Planning turni</h2><div class="card empty">Non gestisci i turni di nessun team.</div>`;
+  if(!canEditTeam(ui.dept))ui.dept=teams[0].id;
+  const seg=teams.length>1?`<div class="seg">${teams.map(x=>`<button class="${x.id===ui.dept?'on':''}" data-act="dept" data-v="${x.id}">${h(x.name)}</button>`).join('')}</div>`:`<p class="muted" style="margin-top:-8px">${h(teams[0].name)}</p>`;
+  const depId=ui.dept,dp=dept(depId),P=ui.preview&&ui.preview.dept===depId?ui.preview:null;
+  if(ui.preview&&!P)ui.preview=null;
+  const noTurns=!D.months.includes(ui.month)||!D.assignments.some(a=>inMonth(a.day)&&(mem(a.member_id)||{}).department_id===depId);
+  if(noTurns&&!P)return`<h2>Planning turni</h2>${seg}<div class="toolbar">${monthPicker('f-month',list)}</div>
+    <div class="card"><h3>${monthLabel(ui.month)}: turni da generare</h3><p class="muted">Ti preparo <b>3 versioni</b> del piano di ${h(dp.name)} (equilibrata, più comoda, più equa), con coperture per mansione, riposi, festivi, preferenze, note ed equità degli ultimi 12 mesi. Le confronti, guardi l'anteprima e applichi quella che preferisci.</p>
+    <p class="muted">Finché non pubblichi, i turni restano in <b>bozza</b>: li vedi solo tu${isMgr()?'':' e la direzione'}.</p>
+    <button class="primary" data-act="genfull">Calcola le versioni</button></div>${eventsCard(false)}`;
+  const pub=isPublished(depId);
+  const pubbar=P?'':pub?`<div class="pubbar pub"><div><b>Pubblicato</b><small>Il team vede questi turni e li ha nel calendario.</small></div><button class="ghost sm" data-act="unpublish">Riporta in bozza</button></div>`
+    :`<div class="pubbar draft"><div><b>Bozza</b><small>La vedi solo tu${isMgr()?'':' e la direzione'}. Il team non riceve ancora nulla.</small></div><div class="row">${isMgr()&&teams.filter(t=>!isPublished(t.id)).length>1?'<button class="ghost sm" data-act="publishall">Pubblica tutti i team</button>':''}<button class="primary sm" data-act="publish">Pubblica</button></div></div>`;
+  const prevbar=P?`<div class="prevbar"><div class="grow"><b>Anteprima · ${h(P.variants.find(x=>x.key===P.key).label)}</b><br><small class="muted">${P.from>0?`Dal ${fmt(P.from)} · `:''}non ancora applicata</small></div><button class="ghost sm" data-act="vchoose">Versioni</button><button class="ghost sm" data-act="vcancel">Annulla</button><button class="primary sm" data-act="vapply" data-v="${P.key}">Applica</button></div>`:'';
+  return withPreview(()=>{
+    const emps=employees(depId);let unc=0,v=0,x=0;
+    covRows(depId,emps,[...Array(daysIn()).keys()]).forEach(r=>r.cells.forEach(c=>{if(c)unc+=Math.max(0,c.need-c.k)}));
+    emps.forEach(e=>{v+=violFlagsCtx(e.id,depId).filter(Boolean).length;x+=softFlagsCtx(e.id).filter(Boolean).length});
+    const hol=[...Array(daysIn()).keys()].filter(isHol).map(d=>`${d+1} ${holidayName(dateOf(d))}`);
+    return`<h2>Planning turni</h2>${seg}${prevbar}${pubbar}
+    <div class="toolbar">${monthPicker('f-month',list)}${P?'':`<button class="ghost sm" data-act="regenopt">Rigenera…</button><button class="ghost sm" data-act="history">Storico</button>`}</div>
+    ${P?'':`<div class="seg" style="margin-bottom:8px"><button class="${ui.lockMode?'':'on'}" data-act="lockmode" data-v="0">Modifica</button><button class="${ui.lockMode?'on':''}" data-act="lockmode" data-v="1">Lucchetto</button></div>
+    <p class="muted">${ui.lockMode?'Tocca una cella per bloccarla o sbloccarla: la rigenerazione non tocca le celle con il lucchetto.':'Tocca una cella per cambiare il turno: resta bloccata col lucchetto. Rosso = regola violata, arancio = 6° giorno di fila.'}</p>`}
+    ${grid(depId,{editable:!P})}
+    ${hol.length?`<p class="muted" style="font-size:13px">Festivi: ${h(hol.join(' · '))}</p>`:''}
+    ${P?'':eventsCard(true)}
+    <div class="issues">${unc?`<span class="tag bad">${unc} turni scoperti</span>`:'<span class="tag ok">Copertura completa</span>'} ${v?`<span class="tag bad">${v} violazioni</span>`:'<span class="tag ok">Nessuna violazione</span>'} ${x?`<span class="tag warn">${x} giorni eccezionali (6° di fila)</span>`:''} <span class="tag">Monte giorni: ${target()}</span></div>`});
+};
+
+function versionsSheet(){
+  const P=ui.preview;if(!P)return;
+  const best=k=>Math.min(...P.variants.map(v=>v.metrics[k]));
+  const cell=(v,k,lab,bad)=>`<div class="${bad&&v.metrics[k]>0?'bad':''} ${P.variants.length>1&&v.metrics[k]===best(k)&&new Set(P.variants.map(x=>x.metrics[k])).size>1?'best':''}"><b>${v.metrics[k]}</b>${lab}</div>`;
+  modal(`<h3>Scegli la versione</h3><p class="muted">${h(dept(P.dept).name)} · ${monthLabel(ui.month)}${P.from>0?` · dal ${fmt(P.from)}`:''}${P.locked?` · ${P.locked} celle bloccate rispettate`:''}. Le differenze contano anche gli ultimi 12 mesi.</p>
+  ${P.variants.map(v=>`<div class="vcard ${v.key===P.key?'on':''}"><h4>${h(v.label)}</h4><p>${h(v.hint)}</p><div class="mets">
+   ${cell(v,'uncovered','scoperti',true)}${cell(v,'isolated','giorni isolati',true)}${cell(v,'comfortMisses','riposi mancati',true)}
+   ${cell(v,'nightsSpread','diff. notti')}${cell(v,'weekendSpread','diff. weekend')}${cell(v,'holidaySpread','diff. festivi')}
+   ${P.hasCur?cell(v,'changes','celle cambiate'):''}${cell(v,'exceptions','6° di fila',true)}</div>
+   <div class="row"><button class="ghost sm" data-act="vprev" data-v="${v.key}">Anteprima</button><button class="primary sm" data-act="vapply" data-v="${v.key}">Applica</button></div></div>`).join('')}`,
+  `<button class="ghost" data-act="vcancel">Annulla</button>`);
+}
+async function computePlan(opts){
+  const depId=ui.dept;
+  try{const r=await api('generate',{month:ui.month,department_id:depId,...opts});
+    ui.preview={dept:depId,month:ui.month,draft:r.draft_id,variants:r.variants,key:r.variants[0].key,from:Number(r.from.slice(8,10))-1,locked:r.locked,memberIds:teamMembersOf([depId]),hasCur:r.variants.some(v=>v.key==='stable')};
+    render();versionsSheet();
+  }catch(e){toast(e.message)}
+}
+async function loadFair(){const k=ui.month;ui.fair=ui.fair||{};if(ui.fair[k]!==undefined)return;ui.fair[k]=null;
+  try{ui.fair[k]=(await api('fairness',{month:k})).history;render()}catch(e){ui.fair[k]={};console.warn(e)}}
+const _report=V.report;
+V.report=()=>{
+  const base=_report();if(notGenerated())return base;
+  loadFair();const F=(ui.fair||{})[ui.month];
+  const hol=[...Array(daysIn()).keys()].filter(isHol);
+  const card=dp=>{const emps=employees(dp.id);return`<div class="card" style="overflow-x:auto"><h3>${h(dp.name)} · equità nel tempo</h3>${F?`<table class="rep"><thead><tr><th>Persona</th><th>Notti 12 mesi</th><th>Weekend 12 mesi</th><th>Festivi 12 mesi</th><th>Festivi questo mese</th></tr></thead><tbody>
+    ${emps.map(e=>{const f=F[e.id]||{nights:0,weekends:0,holidays:0},s=seqOf(e.id);return`<tr><td>${h(e.name)}</td><td>${f.nights}</td><td>${f.weekends}</td><td>${f.holidays}</td><td>${hol.filter(d=>s[d]!=='R').length}/${hol.length}</td></tr>`}).join('')}</tbody></table>
+    <p class="muted" style="font-size:13px">Il generatore dà meno notti, weekend e festivi a chi ne ha fatti di più negli ultimi 12 mesi.</p>`:'<div class="empty">Calcolo…</div>'}</div>`};
+  return base+editableTeams().map(card).join('');
+};
+
+const _cell=A.cell;
+Object.assign(A,{
+  genfull(){computePlan({})},
+  generate(){computePlan({})},
+  regen(){A.regenopt()},
+  regenopt(){const dp=dept(ui.dept),n=daysIn(),t=todayIdx(),def=Math.max(0,t);
+    const emps=employees(ui.dept),locks=[...(D.locks||[])].filter(k=>emps.some(e=>k.startsWith(e.id+'|'))).length;
+    modal(`<h3>Rigenera ${h(dp.name)}</h3><p class="muted">${monthLabel(ui.month)}. Calcolo 3 versioni: niente cambia finché non ne applichi una.</p>
+    <label class="f">Da che giorno<select id="g-from">${[...Array(n).keys()].map(d=>`<option value="${d}" ${d===def?'selected':''} ${t>0&&d<t?'disabled':''}>${fmt(d)}${d===t?' (oggi)':''}</option>`).join('')}</select></label>
+    <div class="toggle"><input type="checkbox" id="g-all" checked><label for="g-all">Tutto il team</label></div>
+    <div class="plist" id="g-people" style="display:none">${emps.map(e=>`<label><input type="checkbox" value="${e.id}">${h(e.name)}</label>`).join('')}</div>
+    <p class="muted" style="font-size:13px">Non vengono toccati: ${locks?`<b>${locks} celle con il lucchetto</b>, `:'le celle con il lucchetto, '}i giorni liberi approvati e i giorni già passati.</p>`,
+    `<button class="ghost" data-act="mclose">Annulla</button><button class="primary" data-act="regengo">Calcola le versioni</button>`);
+    setTimeout(()=>{const c=document.getElementById('g-all');if(c)c.onchange=()=>{document.getElementById('g-people').style.display=c.checked?'none':''}},30)},
+  regengo(){const from=+document.getElementById('g-from').value,all=document.getElementById('g-all').checked;
+    const ids=all?null:[...document.querySelectorAll('#g-people input:checked')].map(x=>x.value);
+    if(ids&&!ids.length)return toast('Scegli almeno una persona');
+    closeModal();computePlan({from:dateOf(from),member_ids:ids})},
+  vchoose:versionsSheet,
+  vprev(v){ui.preview.key=v;closeModal();render();scrollTo(0,0)},
+  vcancel(){ui.preview=null;closeModal();render()},
+  async vapply(v){const P=ui.preview;closeModal();
+    const r=await run(()=>api('apply_plan',{draft_id:P.draft,key:v}));
+    if(r){ui.preview=null;render();toast(r.changed?`Applicato: ${r.changed} celle aggiornate${isPublished(P.dept)?'':' · ricordati di pubblicare'}`:'Nessuna cella da cambiare')}},
+  lockmode(v){ui.lockMode=v==='1';render()},
+  cell(v,t,ev){const[id,d]=v.split('|');const key=id+'|'+dateOf(+d);
+    if(ui.lockMode){const on=!D.locks.has(key);on?D.locks.add(key):D.locks.delete(key);render();
+      api('toggle_lock',{member_id:id,day:dateOf(+d),on}).catch(e=>{toast(e.message);scheduleReload()});return}
+    D.locks.add(key);_cell(v,t,ev)},
+  publish(){const dp=dept(ui.dept);confirmBox(`Pubblicare i turni di <b>${h(dp.name)}</b> per ${monthLabel(ui.month)}? Ogni persona del team riceve una notifica e li trova nel calendario del telefono.`,'Pubblica',()=>run(()=>api('publish_month',{month:ui.month,department_id:ui.dept}),'Turni pubblicati'))},
+  publishall(){confirmBox(`Pubblicare i turni di <b>tutti i team</b> per ${monthLabel(ui.month)}?`,'Pubblica tutti',()=>run(()=>api('publish_month',{month:ui.month}),'Turni pubblicati'))},
+  unpublish(){confirmBox(`Riportare in bozza ${h(dept(ui.dept).name)}? Il team non vedrà più questo mese finché non lo ripubblichi.`,'Riporta in bozza',()=>run(()=>api('unpublish_month',{month:ui.month,department_id:ui.dept}),'Riportato in bozza'),true)},
+  async history(){try{const r=await api('history',{month:ui.month});
+    const lab=c=>c==='R'?'riposo':c;
+    modal(`<h3>Storico modifiche</h3><p class="muted">${monthLabel(ui.month)} · le modifiche più recenti in alto.</p>${r.groups.length?r.groups.map(g=>`<div class="hist ${g.undone?'undone':''}"><div class="row"><div><b>${h(SRC[g.source]||g.source)}</b><br><small>${g.actor?h(g.actor)+' · ':''}${ago(g.at)}${g.undone?' · annullata':''}</small></div>${g.undone||g.source==='annulla'?'':`<button class="ghost sm" data-act="undo" data-v="${g.batch}">Annulla</button>`}</div>
+      <div class="it">${g.items.slice(0,6).map(i=>`${h((i.member||'').split(' ')[0])} ${fmtS(i.day)}: ${lab(i.from)} → <b>${lab(i.to)}</b>`).join(' · ')}${g.items.length>6?` · +${g.items.length-6} altre`:''}</div></div>`).join(''):'<div class="empty">Nessuna modifica registrata</div>'}`,
+    `<button class="primary" data-act="mclose">Chiudi</button>`)}catch(e){toast(e.message)}},
+  undo(v){confirmBox('Annullare questa modifica? Le celle cambiate di nuovo dopo restano come sono.','Annulla modifica',async()=>{const r=await run(()=>api('undo_change',{batch:v}));if(r)toast(`Annullata: ${r.done} celle ripristinate${r.skipped?`, ${r.skipped} lasciate`:''}`)},true)},
+});
+</script>
+
 </body>
 </html>

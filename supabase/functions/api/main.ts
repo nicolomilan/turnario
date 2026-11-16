@@ -1,6 +1,6 @@
 // Turnario API — tutte le scritture passano da qui (il client ha solo lettura via RLS).
 import { createClient } from 'npm:@supabase/supabase-js@2';
-import { bestSchedule, findOffers, offerValid, CTX_DAYS } from './logic.js';
+import { findOffers, offerValid, CTX_DAYS, planVariants, planMetrics, holidaysOfMonth, italianHolidays, nightCodes } from './logic.js';
 
 const URL_ = Deno.env.get('SUPABASE_URL')!;
 const SERVICE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -112,9 +112,15 @@ function deptCtx(c: Ctx, deptId: string | null) {
     colleagues: c.members.filter((m) => m.active && m.department_id === deptId).map((m) => m.id),
   };
 }
-async function setCode(b: string, memberId: string, day: string, code: string, skill: string | null = null) {
+// ogni modifica di un turno finisce nello storico (con chi l'ha fatta), così si può annullare
+type Meta = { actor?: string | null; source?: string; batch?: string };
+async function setCode(b: string, memberId: string, day: string, code: string, skill: string | null = null, meta: Meta = {}) {
+  const old = (await q(db.from('assignments').select('code,skill').eq('member_id', memberId).eq('day', day)) as any[])[0];
+  const oc = old?.code || 'R', os = old?.skill ?? null;
+  if (oc === code && (code === 'R' || os === skill)) return;
   if (code === 'R') await q(db.from('assignments').delete().eq('member_id', memberId).eq('day', day));
   else await q(db.from('assignments').upsert({ business_id: b, member_id: memberId, day, code, skill }));
+  await db.from('change_log').insert({ business_id: b, batch: meta.batch || crypto.randomUUID(), member_id: memberId, day, old_code: oc, new_code: code, old_skill: os, new_skill: code === 'R' ? null : skill, actor: meta.actor || null, source: meta.source || 'sistema' });
 }
 function rulesByMember(rows: any[]) {
   const out: Record<string, any[]> = {};
@@ -168,11 +174,11 @@ async function afterOfferClosed(c: Ctx, dayId: string) {
 const rangeIdx = (from: string, to: string) => { const a: number[] = []; for (let d = idxOf(from); d <= idxOf(to); d++) a.push(d); return a; };
 
 async function applyOffer(c: Ctx, o: any) {
-  const b = o.business_id;
+  const b = o.business_id, mt: Meta = { actor: o.to_member, source: o.type === 'swap' ? 'scambio' : 'copertura', batch: crypto.randomUUID() };
   const skA = c.skillSeqs[o.from_member]?.[idxOf(o.day)] ?? null, skB = o.day2 ? (c.skillSeqs[o.to_member]?.[idxOf(o.day2)] ?? null) : null;
-  await setCode(b, o.from_member, o.day, 'R');
-  await setCode(b, o.to_member, o.day, o.shift_code, skA);
-  if (o.type === 'swap') { await setCode(b, o.from_member, o.day2, o.shift2_code, skB); await setCode(b, o.to_member, o.day2, 'R'); }
+  await setCode(b, o.from_member, o.day, 'R', null, mt);
+  await setCode(b, o.to_member, o.day, o.shift_code, skA, mt);
+  if (o.type === 'swap') { await setCode(b, o.from_member, o.day2, o.shift2_code, skB, mt); await setCode(b, o.to_member, o.day2, 'R', null, mt); }
   const A = c.byId.get(o.from_member), B = c.byId.get(o.to_member);
   await log(b, `Turno aggiornato: ${B?.name} copre ${A?.name} ${fmt(o.day)}` + (o.type === 'swap' ? `, in cambio ${A?.name} lavora ${fmt(o.day2)}.` : ' (copertura).'));
 }
@@ -348,51 +354,242 @@ H.reset_password = async (me, p) => {
   return { ok: true, password: pw };
 };
 
+// Turni lavorati negli ultimi 12 mesi (notti, weekend, festivi): servono all'equità nel tempo
+async function historyFor(b: string, month: string, members: any[], shifts: any[]) {
+  const end = addDays(dateOf(month, 0), -1), [y, mo] = month.split('-').map(Number);
+  const start = `${mo === 12 ? y : y - 1}-${pad(mo === 12 ? 1 : mo)}-01`;
+  const rows: any[] = [];
+  for (let from = 0; ; from += 1000) {
+    const part = await q(db.from('assignments').select('member_id,day,code').eq('business_id', b).gte('day', start).lte('day', end).in('member_id', members.map((m) => m.id).concat(['00000000-0000-0000-0000-000000000000'])).range(from, from + 999)) as any[];
+    rows.push(...part); if (part.length < 1000) break;
+  }
+  const nightsBy: Record<string, Set<string>> = {};
+  for (const m of members) nightsBy[m.id] = nightCodes(shifts.filter((s: any) => s.department_id === m.department_id));
+  const holCache: Record<number, Record<string, string>> = {};
+  const out: Record<string, { nights: number; weekends: number; holidays: number }> = {};
+  members.forEach((m) => (out[m.id] = { nights: 0, weekends: 0, holidays: 0 }));
+  for (const r of rows) {
+    const h = out[r.member_id]; if (!h) continue;
+    const yy = Number(r.day.slice(0, 4)), wd = new Date(r.day + 'T12:00:00Z').getUTCDay();
+    if (nightsBy[r.member_id].has(r.code)) h.nights++;
+    if (wd === 0 || wd === 6) h.weekends++;
+    if ((holCache[yy] ||= italianHolidays(yy))[r.day.slice(5)]) h.holidays++;
+  }
+  return out;
+}
+
+// Calcola 3 versioni del piano (senza salvarle nei turni): la direzione sceglie e applica.
+// Opzioni: department_id, from (data: ricalcola solo da quel giorno), member_ids (solo quelle persone).
 H.generate = async (me, p) => {
   needMember(me);
   if (!isMonth(p.month)) fail(400, 'Mese non valido.');
   const b = me.business_id, month = p.month, n = daysIn(month);
-  const [biz, allDepts, shifts, allMembers, needsRows, ruleRows, evRows] = await Promise.all([
+  const first0 = dateOf(month, 0), last0 = dateOf(month, n - 1);
+  const [biz, allDepts, shifts, allMembers, needsRows, ruleRows, evRows, asg, locks, reqLocks] = await Promise.all([
     q(db.from('businesses').select('*').eq('id', b).single()),
     q(db.from('departments').select('*').eq('business_id', b)),
     q(db.from('shift_types').select('*').eq('business_id', b)),
     q(db.from('members').select('*').eq('business_id', b).eq('active', true)),
     q(db.from('shift_needs').select('*').eq('business_id', b)),
     q(db.from('member_rules').select('*').eq('business_id', b)),
-    q(db.from('events').select('*').eq('business_id', b).lte('date_from', dateOf(month, n - 1)).gte('date_to', dateOf(month, 0))),
+    q(db.from('events').select('*').eq('business_id', b).lte('date_from', last0).gte('date_to', first0)),
+    q(db.from('assignments').select('member_id,day,code,skill').eq('business_id', b).gte('day', first0).lte('day', last0)),
+    q(db.from('cell_locks').select('member_id,day').eq('business_id', b).gte('day', first0).lte('day', last0)),
+    q(db.from('request_days').select('member_id,day').eq('business_id', b).in('status', ['approved', 'awaiting_manager']).gte('day', first0).lte('day', last0)),
   ]) as any[];
   // la direzione genera tutti i team; un responsabile solo i suoi
   const depts = allDepts.filter((d: any) => (me.role === 'manager' || schedulesDept(me, d)) && (!p.department_id || d.id === p.department_id));
   if (!depts.length) fail(403, 'Non gestisci i turni di nessun team.');
   const members = allMembers.filter((m: any) => depts.some((d: any) => d.id === m.department_id));
+  const onlyIds: string[] | null = Array.isArray(p.member_ids) && p.member_ids.length ? p.member_ids.filter((x: any) => members.some((m: any) => m.id === x)) : null;
+  if (onlyIds && !onlyIds.length) fail(400, 'Nessuna persona valida.');
+  // da quale giorno ricalcolare: mai i giorni già passati di un mese che ha già i turni
+  const today = new Date().toISOString().slice(0, 10);
+  let fromIdx = isDate(p.from) && monthOf(p.from) === month ? idxOf(p.from) : 0;
+  if (asg.length && monthOf(today) === month) fromIdx = Math.max(fromIdx, idxOf(today));
+  if (asg.length && today > last0 && !p.allow_past) fail(400, 'Questo mese è già passato.');
   const memberRules = rulesByMember(ruleRows);
   const dow = (d: number) => new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)) - 1, d + 1)).getUTCDay();
-  const rows: any[] = []; let unc = 0;
+  const holidays = holidaysOfMonth(month);
   const [y, mo] = month.split('-').map(Number);
-  // coda del mese precedente: notti, giorni di fila e riposi continuano oltre il cambio mese
-  const pre = await ctxDays(b, addDays(dateOf(month, 0), -CTX_DAYS), addDays(dateOf(month, 0), -1), members.map((m: any) => m.id));
+  const cur: Record<string, string[]> = {}, curSk: Record<string, (string | null)[]> = {};
+  members.forEach((m: any) => { cur[m.id] = Array(n).fill('R'); curSk[m.id] = Array(n).fill(null); });
+  asg.forEach((a: any) => { if (cur[a.member_id]) { cur[a.member_id][idxOf(a.day)] = a.code; curSk[a.member_id][idxOf(a.day)] = a.skill; } });
+  const lockSet = new Set([...locks, ...reqLocks].map((l: any) => `${l.member_id}|${idxOf(l.day)}`));
+  const pre = await ctxDays(b, addDays(first0, -CTX_DAYS), addDays(first0, -1), members.map((m: any) => m.id));
+  const history = await historyFor(b, month, members, shifts);
+  const variants: any[] = [];
+  let locked = 0;
   for (const dp of depts) {
     const ids = members.filter((m: any) => m.department_id === dp.id).map((m: any) => m.id);
     const sh = shifts.filter((s: any) => s.department_id === dp.id);
     if (!ids.length || !sh.length) continue;
     const needs = needsRows.filter((x: any) => sh.some((s: any) => s.id === x.shift_type_id)).map((x: any) => ({ ...x, shift_code: sh.find((s: any) => s.id === x.shift_type_id).code }));
     const skills = Object.fromEntries(members.map((m: any) => [m.id, m.skills || []]));
-    // eventi del mese che riguardano questo team
     const dayAdjust = (d: number) => { const day = dateOf(month, d);
       return evRows.filter((e: any) => e.date_from <= day && e.date_to >= day).flatMap((e: any) => (e.adjustments || []).filter((a: any) => a.department_id === dp.id)); };
-    const best = bestSchedule({ shifts: sh, memberIds: ids, n, rules: biz.rules, seedBase: y * 12 + mo, pre, skills, needs, memberRules, dow, dayAdjust }, 60);
-    unc += best.uncovered;
-    for (const id of ids) best.seq[id].forEach((c: string, d: number) => { if (c !== 'R') rows.push({ business_id: b, member_id: id, day: dateOf(month, d), code: c, skill: best.skillSeq[id][d] }); });
+    // celle fisse: bloccate, prima del giorno scelto, persone escluse
+    const fixed: Record<string, Record<number, any>> = {};
+    for (const id of ids) {
+      fixed[id] = {};
+      for (let d = 0; d < n; d++) {
+        const isLocked = lockSet.has(`${id}|${d}`);
+        if (isLocked || d < fromIdx || (onlyIds && !onlyIds.includes(id))) { fixed[id][d] = { code: cur[id][d], skill: curSk[id][d] }; if (isLocked && d >= fromIdx) locked++; }
+      }
+    }
+    const current = asg.length ? Object.fromEntries(ids.map((id: string) => [id, cur[id]])) : null;
+    const V = planVariants({ shifts: sh, memberIds: ids, n, rules: biz.rules, seedBase: y * 12 + mo + Math.floor(Math.random() * 1000), pre, skills, needs, memberRules, dow, dayAdjust, fixed, history, holidays, current }, 30);
+    V.forEach((v: any, k: number) => {
+      const t = variants[k] ||= { key: v.key, label: v.label, hint: v.hint, metrics: null, rows: [] };
+      const m = planMetrics(v.result, ids, sh, dow, holidays, history);
+      if (!t.metrics) t.metrics = m;
+      else for (const key of Object.keys(m)) t.metrics[key] = /Spread$/.test(key) ? Math.max(t.metrics[key], (m as any)[key]) : t.metrics[key] + (m as any)[key];
+      for (const id of ids) v.result.seq[id].forEach((c: string, d: number) => { if (c !== 'R') t.rows.push([id, d, c, v.result.skillSeq[id][d]]); });
+    });
   }
-  const mids = members.map((m: any) => m.id).concat(['00000000-0000-0000-0000-000000000000']);
-  await q(db.from('requests').delete().eq('business_id', b).in('member_id', mids).gte('date_from', dateOf(month, 0)).lte('date_from', dateOf(month, n - 1)));
-  await q(db.from('assignments').delete().eq('business_id', b).in('member_id', mids).gte('day', dateOf(month, 0)).lte('day', dateOf(month, n - 1)));
-  for (let i = 0; i < rows.length; i += 500) await q(db.from('assignments').insert(rows.slice(i, i + 500)));
+  if (!variants.length) fail(400, 'Mancano persone o turni nei team.');
+  const scope = { depts: depts.map((d: any) => d.id), from: fromIdx, members: onlyIds, month };
+  await db.from('plan_drafts').delete().eq('business_id', b).eq('created_by', me.id);
+  const draft = await q(db.from('plan_drafts').insert({ business_id: b, month: first0, scope, variants, created_by: me.id }).select('id').single()) as any;
+  const pubs = await q(db.from('publications').select('department_id').eq('month', first0).in('department_id', scope.depts)) as any[];
+  return { ok: true, draft_id: draft.id, from: dateOf(month, fromIdx), locked, published: pubs.length === scope.depts.length, partial: pubs.length > 0 && pubs.length < scope.depts.length,
+    variants: variants.map((v) => ({ key: v.key, label: v.label, hint: v.hint, metrics: v.metrics, rows: v.rows })) };
+};
+
+// Applica la versione scelta: cambia solo le celle diverse, le registra nello storico, avvisa chi è toccato se il mese è pubblicato
+H.apply_plan = async (me, p) => {
+  needMember(me);
+  const dr = (await q(db.from('plan_drafts').select('*').eq('id', p.draft_id).eq('business_id', me.business_id).eq('created_by', me.id)) as any[])[0];
+  if (!dr) fail(404, 'Proposta scaduta: rigenera.');
+  const v = dr.variants.find((x: any) => x.key === p.key); if (!v) fail(400, 'Versione non valida.');
+  const { month, from, depts } = dr.scope, n = daysIn(month), b = me.business_id;
+  const allDepts = await q(db.from('departments').select('*').eq('business_id', b).in('id', depts)) as any[];
+  if (!allDepts.every((d: any) => me.role === 'manager' || schedulesDept(me, d))) fail(403, 'Non gestisci più questi team.');
+  const members = await q(db.from('members').select('*').eq('business_id', b).in('department_id', depts).eq('active', true)) as any[];
+  const ids = dr.scope.members || members.map((m: any) => m.id);
+  const fromDay = dateOf(month, from), last0 = dateOf(month, n - 1);
+  const [asg, locks, reqLocks] = await Promise.all([
+    q(db.from('assignments').select('member_id,day,code,skill').eq('business_id', b).in('member_id', ids).gte('day', fromDay).lte('day', last0)),
+    q(db.from('cell_locks').select('member_id,day').eq('business_id', b).gte('day', fromDay).lte('day', last0)),
+    q(db.from('request_days').select('member_id,day').eq('business_id', b).in('status', ['approved', 'awaiting_manager']).gte('day', fromDay).lte('day', last0)),
+  ]) as any[];
+  const lockSet = new Set([...locks, ...reqLocks].map((l: any) => `${l.member_id}|${l.day}`));
+  const cur = new Map(asg.map((a: any) => [`${a.member_id}|${a.day}`, a]));
+  const want = new Map<string, any>();
+  for (const [id, d, c, sk] of v.rows) if (d >= from && ids.includes(id)) want.set(`${id}|${dateOf(month, d)}`, { code: c, skill: sk });
+  const batch = crypto.randomUUID(), logs: any[] = [], ups: any[] = [], dels: Record<string, string[]> = {}, touched: Record<string, number> = {};
+  for (const id of ids) for (let d = from; d < n; d++) {
+    const day = dateOf(month, d), key = `${id}|${day}`;
+    if (lockSet.has(key)) continue;
+    const o = cur.get(key) as any, w = want.get(key);
+    const oc = o?.code || 'R', nc = w?.code || 'R';
+    if (oc === nc && (nc === 'R' || (o?.skill ?? null) === (w?.skill ?? null))) continue;
+    if (nc === 'R') (dels[id] ||= []).push(day); else ups.push({ business_id: b, member_id: id, day, code: nc, skill: w.skill ?? null });
+    logs.push({ business_id: b, batch, member_id: id, day, old_code: oc, new_code: nc, old_skill: o?.skill ?? null, new_skill: w?.skill ?? null, actor: me.id, source: 'piano' });
+    if (oc !== nc) touched[id] = (touched[id] || 0) + 1;
+  }
+  for (const [id, days] of Object.entries(dels)) await q(db.from('assignments').delete().eq('member_id', id).in('day', days));
+  for (let i = 0; i < ups.length; i += 500) await q(db.from('assignments').upsert(ups.slice(i, i + 500)));
+  for (let i = 0; i < logs.length; i += 500) await q(db.from('change_log').insert(logs.slice(i, i + 500)));
   await q(db.from('months').upsert({ business_id: b, month: dateOf(month, 0), generated_at: new Date().toISOString() }));
-  const label = `${MESI[mo - 1]} ${y}`;
-  await log(b, `Turni di ${label} (${depts.map((d: any) => d.name).join(', ')}) generati automaticamente${unc ? ` (${unc} turni scoperti: servono più persone)` : ''}.`);
-  if (p.notify) for (const m of members) await notify(m, `Sono pubblicati i turni di ${label}.`, `Turnario: turni di ${label} pubblicati`);
-  return { ok: true, uncovered: unc };
+  await db.from('plan_drafts').delete().eq('id', dr.id);
+  const [y, mo] = month.split('-').map(Number), label = `${MESI[mo - 1]} ${y}`;
+  const pubs = new Set((await q(db.from('publications').select('department_id').eq('month', dateOf(month, 0)).in('department_id', depts)) as any[]).map((x) => x.department_id));
+  for (const m of members) if (touched[m.id] && pubs.has(m.department_id)) await notify(m, `I tuoi turni di ${label} sono cambiati (${touched[m.id]} ${touched[m.id] === 1 ? 'giorno' : 'giorni'}).`, `Turnario: turni di ${label} aggiornati`);
+  await log(b, `${me.name} ha applicato il piano "${v.label}" per ${label} (${allDepts.map((d: any) => d.name).join(', ')}${from ? `, dal ${fmt(fromDay)}` : ''}): ${logs.length} celle cambiate.`);
+  return { ok: true, changed: logs.length, batch };
+};
+
+// Pubblica il mese: da bozza (visibile solo a chi fa i turni) a visibile per tutti, con una notifica a ognuno
+H.publish_month = async (me, p) => {
+  needMember(me);
+  if (!isMonth(p.month)) fail(400, 'Mese non valido.');
+  const b = me.business_id, first0 = dateOf(p.month, 0);
+  const all = await q(db.from('departments').select('*').eq('business_id', b)) as any[];
+  const depts = all.filter((d: any) => (me.role === 'manager' || schedulesDept(me, d)) && (!p.department_id || d.id === p.department_id));
+  if (!depts.length) fail(403, 'Non gestisci i turni di nessun team.');
+  const already = new Set((await q(db.from('publications').select('department_id').eq('month', first0).in('department_id', depts.map((d: any) => d.id))) as any[]).map((x) => x.department_id));
+  const todo = depts.filter((d: any) => !already.has(d.id));
+  if (!todo.length) return { ok: true, already: true };
+  await q(db.from('publications').insert(todo.map((d: any) => ({ business_id: b, department_id: d.id, month: first0, published_by: me.id }))));
+  const [y, mo] = p.month.split('-').map(Number), label = `${MESI[mo - 1]} ${y}`;
+  const ms = await q(db.from('members').select('*').eq('business_id', b).eq('active', true).in('department_id', todo.map((d: any) => d.id))) as Member[];
+  for (const m of ms) if (m.id !== me.id) await notify(m, `Sono pubblicati i turni di ${label}.`, `Turnario: turni di ${label} pubblicati`);
+  await log(b, `${me.name} ha pubblicato i turni di ${label} (${todo.map((d: any) => d.name).join(', ')}).`);
+  return { ok: true, published: todo.length };
+};
+H.unpublish_month = async (me, p) => {
+  needMember(me);
+  if (!isMonth(p.month)) fail(400, 'Mese non valido.');
+  const all = await q(db.from('departments').select('*').eq('business_id', me.business_id)) as any[];
+  const depts = all.filter((d: any) => (me.role === 'manager' || schedulesDept(me, d)) && (!p.department_id || d.id === p.department_id));
+  if (!depts.length) fail(403, 'Non gestisci i turni di nessun team.');
+  await q(db.from('publications').delete().eq('month', dateOf(p.month, 0)).in('department_id', depts.map((d: any) => d.id)));
+  await log(me.business_id, `${me.name} ha riportato in bozza i turni di ${p.month}.`);
+  return { ok: true };
+};
+
+// Lucchetto su una cella: la rigenerazione non la tocca
+H.toggle_lock = async (me, p) => {
+  needMember(me);
+  if (!isDate(p.day)) fail(400, 'Data non valida.');
+  const m = await q(db.from('members').select('*').eq('id', p.member_id).eq('business_id', me.business_id).single()) as Member;
+  await needTeamEditor(me, m.department_id);
+  const ex = await q(db.from('cell_locks').select('day').eq('member_id', m.id).eq('day', p.day)) as any[];
+  const on = p.on ?? !ex.length;
+  if (on && !ex.length) await q(db.from('cell_locks').insert({ business_id: me.business_id, member_id: m.id, day: p.day }));
+  if (!on && ex.length) await q(db.from('cell_locks').delete().eq('member_id', m.id).eq('day', p.day));
+  return { ok: true, locked: on };
+};
+
+// Equità nel tempo: notti, weekend e festivi degli ultimi 12 mesi (per il Report)
+H.fairness = async (me, p) => {
+  needMember(me);
+  if (!isMonth(p.month)) fail(400, 'Mese non valido.');
+  const ms = await editableMemberIds(me);
+  const shifts = await q(db.from('shift_types').select('*').eq('business_id', me.business_id)) as any[];
+  return { history: await historyFor(me.business_id, p.month, ms, shifts) };
+};
+// Storico delle modifiche (raggruppate) per chi fa i turni
+async function editableMemberIds(me: Me) {
+  const ds = await q(db.from('departments').select('*').eq('business_id', me.business_id)) as any[];
+  const mine = ds.filter((d: any) => me.role === 'manager' || schedulesDept(me, d)).map((d: any) => d.id);
+  if (!mine.length) fail(403, 'Non gestisci i turni di nessun team.');
+  const ms = await q(db.from('members').select('id,name,department_id').eq('business_id', me.business_id).in('department_id', mine)) as any[];
+  return ms;
+}
+H.history = async (me, p) => {
+  needMember(me);
+  const ms = await editableMemberIds(me), names = new Map(ms.map((m: any) => [m.id, m.name]));
+  const all = await q(db.from('members').select('id,name').eq('business_id', me.business_id)) as any[];
+  const anyName = new Map(all.map((m: any) => [m.id, m.name]));
+  let qq = db.from('change_log').select('*').eq('business_id', me.business_id).in('member_id', ms.map((m: any) => m.id)).order('id', { ascending: false }).limit(400);
+  if (isMonth(p.month)) qq = qq.gte('day', dateOf(p.month, 0)).lte('day', dateOf(p.month, daysIn(p.month) - 1));
+  const rows = await q(qq) as any[];
+  const groups: any[] = [], byB = new Map<string, any>();
+  for (const r of rows) {
+    let g = byB.get(r.batch);
+    if (!g) { g = { batch: r.batch, at: r.created_at, source: r.source, actor: anyName.get(r.actor) || null, undone: !!r.undone_at, items: [] }; byB.set(r.batch, g); groups.push(g); }
+    g.items.push({ member: names.get(r.member_id), day: r.day, from: r.old_code, to: r.new_code });
+  }
+  return { groups: groups.slice(0, 60) };
+};
+H.undo_change = async (me, p) => {
+  needMember(me);
+  const ms = await editableMemberIds(me), ok = new Set(ms.map((m: any) => m.id));
+  const rows = await q(db.from('change_log').select('*').eq('business_id', me.business_id).eq('batch', p.batch).is('undone_at', null).order('id', { ascending: false })) as any[];
+  if (!rows.length) fail(404, 'Niente da annullare.');
+  if (!rows.every((r) => ok.has(r.member_id))) fail(403, 'Non gestisci tutti i turni di questa modifica.');
+  const batch = crypto.randomUUID(); let done = 0, skipped = 0;
+  for (const r of rows) {
+    const curr = (await q(db.from('assignments').select('code').eq('member_id', r.member_id).eq('day', r.day)) as any[])[0]?.code || 'R';
+    if (curr !== r.new_code) { skipped++; continue; } // nel frattempo è cambiato di nuovo: non lo tocco
+    await setCode(me.business_id, r.member_id, r.day, r.old_code, r.old_skill, { actor: me.id, source: 'annulla', batch });
+    done++;
+  }
+  await q(db.from('change_log').update({ undone_at: new Date().toISOString() }).eq('batch', p.batch));
+  await log(me.business_id, `${me.name} ha annullato una modifica (${done} celle${skipped ? `, ${skipped} lasciate perché cambiate dopo` : ''}).`);
+  return { ok: true, done, skipped };
 };
 
 H.set_cell = async (me, p) => {
@@ -407,7 +604,9 @@ H.set_cell = async (me, p) => {
     const nd = await q(db.from('shift_needs').select('skill').eq('shift_type_id', ok[0].id)) as any[];
     skill = (p.skill && (m.skills || []).includes(p.skill)) ? p.skill : (nd.map((x) => x.skill).find((sk) => sk && (m.skills || []).includes(sk) && sk !== 'manager') || nd.map((x) => x.skill).find((sk) => sk && (m.skills || []).includes(sk)) || null);
   }
-  await setCode(me.business_id, m.id, p.day, p.code, skill);
+  await setCode(me.business_id, m.id, p.day, p.code, skill, { actor: me.id, source: 'manuale' });
+  // una cella messa a mano resta bloccata: la rigenerazione non la sposta
+  if (p.lock !== false) await db.from('cell_locks').upsert({ business_id: me.business_id, member_id: m.id, day: p.day });
   await log(me.business_id, `Modifica manuale: ${m.name} ${fmt(p.day)} → ${p.code === 'R' ? 'Riposo' : p.code}.`);
   return { ok: true };
 };
@@ -906,7 +1105,7 @@ Deno.serve(async (req) => {
     if (error || !data.user) fail(401, 'Sessione scaduta: accedi di nuovo.');
     const user = data.user!;
     await limit('user:' + user.id, 120, 60);
-    if (['generate', 'preview_request', 'create_request', 'dev_create_hotel', 'add_member', 'reset_password'].includes(body.action)) await limit('heavy:' + user.id, 30, 600);
+    if (['generate', 'apply_plan', 'preview_request', 'create_request', 'dev_create_hotel', 'add_member', 'reset_password'].includes(body.action)) await limit('heavy:' + user.id, 30, 600);
     if (dfn) return json(await dfn(user, body));
     let me: Me | null = null;
     if (body.as_member) {

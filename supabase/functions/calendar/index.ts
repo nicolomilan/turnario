@@ -32,11 +32,15 @@ Deno.serve(async (req) => {
   if (!m) return new Response('Account non attivo', { status: 404 });
 
   const today = new Date().toISOString().slice(0, 10);
-  const [{ data: biz }, { data: shifts }, { data: asg }] = await Promise.all([
+  const [{ data: biz }, { data: shifts }, { data: asg0 }, { data: pubs }] = await Promise.all([
     db.from('businesses').select('name').eq('id', m.business_id).single(),
     db.from('shift_types').select('*').eq('department_id', m.department_id),
     db.from('assignments').select('day,code').eq('member_id', m.id).gte('day', addDays(today, -45)).lte('day', addDays(today, 120)),
+    db.from('publications').select('month').eq('department_id', m.department_id),
   ]);
+  // nel calendario finiscono solo i mesi pubblicati (le bozze no)
+  const pub = new Set((pubs || []).map((x: any) => String(x.month).slice(0, 7)));
+  const asg = (asg0 || []).filter((a: any) => pub.has(String(a.day).slice(0, 7)));
   const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
   const lines = [
     'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Turnario//Turni//IT', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
