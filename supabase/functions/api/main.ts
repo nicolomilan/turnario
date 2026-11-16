@@ -285,6 +285,11 @@ async function needTeamEditor(me: Me | null, deptId: string | null) {
   if (!(schedulesDept(me, dp) || me.role === 'manager')) fail(403, 'Non gestisci i turni di questo team.');
   return dp;
 }
+// chi può gestire una persona: chi fa i turni del suo team; per chi non ha un team, la direzione
+async function needMemberEditor(me: Me | null, m: Member) {
+  if (m.department_id) return needTeamEditor(me, m.department_id);
+  needManager(me);
+}
 async function devReadsNotes() {
   const r = (await q(db.from('platform_settings').select('value').eq('key', 'dev_reads_notes')) as any[])[0];
   return r ? r.value === true : false;
@@ -920,7 +925,7 @@ H.decide_leave = async (me, p) => {
   const l = (await q(db.from('leaves').select('*').eq('id', p.id).eq('business_id', me.business_id)) as any[])[0];
   if (!l || l.status !== 'pending') fail(409, 'Richiesta già gestita.');
   const m = await q(db.from('members').select('*').eq('id', l.member_id).single()) as Member;
-  await needTeamEditor(me, m.department_id);
+  await needMemberEditor(me, m);
   if (m.id === me.id && me.role !== 'manager') fail(403, 'Le tue ferie le approva la direzione.');
   const ok = !!p.approve;
   await q(db.from('leaves').update({ status: ok ? 'approved' : 'rejected', decided_by: me.id, decided_at: new Date().toISOString() }).eq('id', l.id));
@@ -938,7 +943,7 @@ H.decide_leave = async (me, p) => {
 H.set_balance = async (me, p) => {
   needMember(me);
   const m = await q(db.from('members').select('*').eq('id', p.member_id).eq('business_id', me.business_id).single()) as Member;
-  await needTeamEditor(me, m.department_id);
+  await needMemberEditor(me, m);
   const year = Math.round(Number(p.year)), num = (v: any, d: number) => { const x = Number(v); return Number.isFinite(x) ? Math.min(99, Math.max(0, Math.round(x * 2) / 2)) : d; };
   if (!(year >= 2020 && year <= 2100)) fail(400, 'Anno non valido.');
   await q(db.from('leave_balances').upsert({ member_id: m.id, business_id: me.business_id, year, entitled: num(p.entitled, 26), carried: num(p.carried, 0) }));
