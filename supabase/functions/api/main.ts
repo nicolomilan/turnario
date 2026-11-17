@@ -306,7 +306,9 @@ async function needNotesAccess(me: Me | null, memberId: string) {
   if (!m) fail(404, 'Persona non trovata.');
   const dp = await deptRow(me, m.department_id);
   // chi fa i turni del proprio team (es. F&B manager) ha come superiore la direzione
-  if (dp && (dp.scheduler_id === m.id || dp.deputy_id === m.id) && me.role === 'manager' && me.id !== m.id) {
+  const leads = me.role === 'manager' && me.id !== m.id
+    ? ((await q(db.from('departments').select('id').eq('business_id', me.business_id).or(`scheduler_id.eq.${m.id},deputy_id.eq.${m.id}`)) as any[]).length > 0) : false;
+  if (leads) {
     if (me._imp && !(await devReadsNotes())) fail(403, 'Accesso dello sviluppatore alle note disattivato.');
     return { m, dp };
   }
@@ -1202,15 +1204,28 @@ H.delete_event = async (me, p) => {
 /* ---------- personalizzazione: note riservate, preferenze, regole ---------- */
 H.team_personal = async (me, p) => {
   needMember(me);
-  const dp = await deptRow(me, p.department_id); if (!dp) fail(400, 'Team non valido.');
-  await needNotesFor(me, dp);
-  const ms = (await q(db.from('members').select('id').eq('department_id', dp.id).eq('active', true)) as any[]).map((x) => x.id).concat(['00000000-0000-0000-0000-000000000000']);
+  let ms: string[];
+  if (p.leaders) {
+    // la direzione: note e regole su chi fa i turni dei team che non gestisce lei
+    needManager(me);
+    if (me._imp && !(await devReadsNotes())) fail(403, 'Accesso dello sviluppatore alle note disattivato.');
+    const ds = await q(db.from('departments').select('*').eq('business_id', me.business_id)) as any[];
+    const mine = new Set(ds.filter((d: any) => schedulesDept(me, d)).map((d: any) => d.id));
+    const ids = new Set(ds.flatMap((d: any) => [d.scheduler_id, d.deputy_id]).filter((x: any) => x && x !== me.id));
+    const act = await q(db.from('members').select('id,department_id').eq('business_id', me.business_id).eq('active', true)) as any[];
+    ms = act.filter((m: any) => ids.has(m.id) && !mine.has(m.department_id)).map((m: any) => m.id);
+  } else {
+    const dp = await deptRow(me, p.department_id); if (!dp) fail(400, 'Team non valido.');
+    await needNotesFor(me, dp);
+    ms = (await q(db.from('members').select('id').eq('department_id', dp.id).eq('active', true)) as any[]).map((x) => x.id);
+  }
+  ms = ms.concat(['00000000-0000-0000-0000-000000000000']);
   const [notes, rules, prefs] = await Promise.all([
     q(db.from('manager_notes').select('*').in('member_id', ms).order('created_at', { ascending: false })),
     q(db.from('member_rules').select('*').in('member_id', ms).order('created_at')),
     q(db.from('preferences').select('*').in('member_id', ms).order('created_at', { ascending: false })),
   ]);
-  await accessLog(me, 'read_team_notes', dp.id);
+  await accessLog(me, p.leaders ? 'read_leader_notes' : 'read_team_notes', p.leaders ? null : p.department_id);
   return { notes, rules, prefs };
 };
 H.add_note = async (me, p) => {

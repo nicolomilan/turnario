@@ -388,6 +388,12 @@ const isMgr=()=>D&&D.me.role==='manager';
 const employees=depId=>D.members.filter(m=>m.active&&(depId?m.department_id===depId:m.role==='employee'));
 // organigramma: chi fa i turni di quale team
 const myTeams=()=>D?D.departments.filter(d=>d.scheduler_id===D.me.id||d.deputy_id===D.me.id):[];
+// la direzione è il "superiore" di chi fa i turni dei team che non gestisce lei (es. F&B manager)
+const leaders=()=>{if(!D||!isMgr())return[];const mine=new Set(myTeams().map(d=>d.id)),ids=new Set();D.departments.forEach(d=>[d.scheduler_id,d.deputy_id].forEach(x=>x&&ids.add(x)));
+  return D.members.filter(m=>m.active&&ids.has(m.id)&&m.id!==D.me.id&&!mine.has(m.department_id))};
+const LEAD={id:'__leaders',name:'Responsabili'};
+const persoTeams=()=>myTeams().concat(leaders().length?[LEAD]:[]);
+const leadOf=id=>D.departments.filter(d=>d.scheduler_id===id||d.deputy_id===id).map(d=>(d.deputy_id===id&&d.scheduler_id!==id?'sostituto · ':'')+d.name).join(', ');
 const editableTeams=()=>isMgr()?D.departments:myTeams();
 const canEditTeam=depId=>editableTeams().some(d=>d.id===depId);
 const canEditMember=id=>{const m=mem(id);return !!m&&canEditTeam(m.department_id)};
@@ -814,19 +820,22 @@ document.addEventListener('submit',async ev=>{
 
 /* ===== avvio ===== */
 // parte solo quando TUTTO il codice della pagina è caricato (su iPhone l'accesso può rispondere prima)
+let loadedFor=null;
 function startAuth(){let fired=false;BOOT.step='sessione';
   // paracadute: se la sessione salvata non risponde, riparto dalla pagina di accesso invece di restare bloccato
   setTimeout(async()=>{if(fired||BOOT.done)return;BOOT.step='sessione (verifica)';
     const r=await Promise.race([sb.auth.getSession().then(x=>x.data.session).catch(()=>null),new Promise(res=>setTimeout(()=>res('timeout'),4000))]);
     if(fired||BOOT.done)return;
-    if(r&&r!=='timeout'){fired=true;session=r;BOOT.step='accesso';try{await loadAll();subscribe();render()}catch(e){if(D)render();else showFatal(e.message)}return}
+    if(r&&r!=='timeout'){fired=true;session=r;loadedFor=r.user.id;BOOT.step='accesso';try{await loadAll();subscribe();render()}catch(e){if(D)render();else showFatal(e.message)}return}
     try{Object.keys(localStorage).filter(k=>k.startsWith('sb-')).forEach(k=>localStorage.removeItem(k))}catch(_){}
     session=null;ui.err=r==='timeout'?'La sessione salvata non rispondeva: accedi di nuovo.':'';ui.view=location.hash==='#sviluppatore'?'devboot':'login';render()},5000);
   sb.auth.onAuthStateChange((evt,s)=>{fired=true;
-  const was=session&&session.user.id;session=s;
-  if(s&&(evt==='SIGNED_IN'||evt==='INITIAL_SESSION')&&was!==s.user.id){
+  session=s;
+  // carico i dati alla prima sessione valida (qualunque evento arrivi prima, anche il rinnovo del token) o se cambia utente
+  if(s&&loadedFor!==s.user.id){loadedFor=s.user.id;
     BOOT.step='accesso';setTimeout(async()=>{try{await loadAll();subscribe();render()}catch(e){console.error(e);if(D)render();else showFatal(e.message)}},0);
   }
+  if(!s)loadedFor=null;
   if(!s){session=null;D=null;ui.dev=undefined;ui.asMember=null;ui.devHome=false;if(['app','nobiz','dev'].includes(ui.view))ui.view=location.hash==='#sviluppatore'?'devboot':'login';render()}
 })}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',startAuth);else setTimeout(startAuth,0);
@@ -966,16 +975,16 @@ function ruleChip(r,depId,del){return`<span class="rule ${r.source==='pref'?'pre
 
 /* ================= Personalizzazione (responsabile) ================= */
 ui.perso={dept:null,data:null,draft:null,loading:false,err:''};
-async function loadPerso(){const P=ui.perso;P.loading=true;P.err='';try{P.data=await api('team_personal',{department_id:P.dept})}catch(e){P.data=null;P.err=e.message}P.loading=false;render()}
+async function loadPerso(){const P=ui.perso;P.loading=true;P.err='';try{P.data=await api('team_personal',P.dept===LEAD.id?{leaders:true}:{department_id:P.dept})}catch(e){P.data=null;P.err=e.message}P.loading=false;render()}
 V.perso=()=>{
-  const teams=myTeams(),P=ui.perso;
+  const teams=persoTeams(),P=ui.perso;
   if(!teams.length)return`<h2>Personalizza</h2><div class="card empty">La personalizzazione è riservata a chi fa i turni di un team.</div>`;
   if(!P.dept||!teams.some(t=>t.id===P.dept)){P.dept=teams[0].id;P.data=null;P.draft=null}
   if(!P.data&&!P.loading&&!P.err)setTimeout(loadPerso,0);
-  const dp=dept(P.dept),team=employees(P.dept).filter(m=>m.id!==D.me.id);
+  const L=P.dept===LEAD.id,dp=L?{}:dept(P.dept),team=L?leaders():employees(P.dept).filter(m=>m.id!==D.me.id);
   const seg=teams.length>1?`<div class="seg">${teams.map(x=>`<button class="${x.id===P.dept?'on':''}" data-act="persodept" data-v="${x.id}">${h(x.name)}</button>`).join('')}</div>`:'';
   const draft=P.draft?`<div class="card"><h3>Ho capito così</h3>${P.draft.length?P.draft.map((e,i)=>`<div class="pcard"><div class="ohead">${av(e.person.id)}<div><b>${h(e.person.name)}</b><small>${h(e.text)}</small></div></div>
-    ${e.rules.length?e.rules.map((r,j)=>ruleChip(r,P.dept,{act:'draftdel',v:i+'|'+j})).join(''):'<p class="muted">Non ho riconosciuto regole: salvo solo la nota. Puoi aggiungere una regola a mano dalla scheda della persona.</p>'}</div>`).join('')
+    ${e.rules.length?e.rules.map((r,j)=>ruleChip(r,e.person.department_id,{act:'draftdel',v:i+'|'+j})).join(''):'<p class="muted">Non ho riconosciuto regole: salvo solo la nota. Puoi aggiungere una regola a mano dalla scheda della persona.</p>'}</div>`).join('')
     :'<p class="muted">Non ho trovato nomi di colleghi del team nel testo.</p>'}
     <div class="row" style="margin-top:8px"><button class="ghost grow" data-act="draftcancel">Annulla</button>${P.draft.length?'<button class="primary grow" data-act="draftsave">Conferma e salva</button>':''}</div></div>`:'';
   let body='';
@@ -983,11 +992,11 @@ V.perso=()=>{
   else if(P.err)body=`<div class="card empty">${h(P.err)}</div>`;
   else if(P.data){const{notes,rules,prefs}=P.data;
     body=`<div class="card"><h3>Il team</h3>${team.map(m=>{const rs=rules.filter(r=>r.member_id===m.id),ns=notes.filter(n=>n.member_id===m.id),ps=prefs.filter(x=>x.member_id===m.id);
-      return`<div class="pcard"><div class="ohead">${av(m.id)}<div class="grow"><b>${h(m.name)}</b><small>${h(m.job||'')}${(m.skills||[]).map(x=>`<span class="skill">${h(x)}</span>`).join('')}</small></div><button class="ghost sm" data-act="ruleadd" data-v="${m.id}">+ Regola</button></div>
-      ${rs.length?rs.map(r=>ruleChip(r,P.dept,{act:'ruledel',v:r.id})).join(''):'<p class="muted" style="margin:0 0 6px">Nessuna regola</p>'}
+      return`<div class="pcard"><div class="ohead">${av(m.id)}<div class="grow"><b>${h(m.name)}</b><small>${L?`Fa i turni di ${h(leadOf(m.id))} · `:''}${h(m.job||'')}${(m.skills||[]).map(x=>`<span class="skill">${h(x)}</span>`).join('')}</small></div><button class="ghost sm" data-act="ruleadd" data-v="${m.id}">+ Regola</button></div>
+      ${rs.length?rs.map(r=>ruleChip(r,m.department_id,{act:'ruledel',v:r.id})).join(''):'<p class="muted" style="margin:0 0 6px">Nessuna regola</p>'}
       ${ps.map(x=>`<div class="quote">“${h(x.text)}” <small>· preferenza di ${h(first(m.id))}, ${ago(x.created_at)}</small></div>`).join('')}
       ${ns.map(n=>`<div class="quote" style="border-color:var(--accent)">${h(n.text)} <small>· tua nota, ${ago(n.created_at)}</small> <button class="link danger" style="padding:0 4px;min-height:0;font-size:13px" data-act="notedel" data-v="${n.id}">elimina</button></div>`).join('')}</div>`}).join('')||'<div class="empty">Nessuno nel team</div>'}</div>`}
-  return`<h2>Personalizza</h2>${seg}<span class="lock">Riservato: lo vedi solo tu ${dp.deputy_id&&dp.deputy_id!==D.me.id?'e il tuo sostituto':dp.scheduler_id!==D.me.id?'e il responsabile del team':''}</span>
+  return`<h2>Personalizza</h2>${seg}<span class="lock">${L?'Riservato alla direzione: chi fa i turni non vede le note che scrivi su di lui/lei':`Riservato: lo vedi solo tu ${dp.deputy_id&&dp.deputy_id!==D.me.id?'e il tuo sostituto':dp.scheduler_id!==D.me.id?'e il responsabile del team':''}`}</span>
   <div class="card"><h3>Assistente</h3><p class="muted">Scrivi come parleresti a un collega: trasformo le frasi in regole per i turni. Prima di salvare ti mostro cosa ho capito.</p>
   <textarea id="perso-text" placeholder="Es. Marco chiede le notti ma sbaglia spesso: evitiamolo il più possibile. Giovanni lavora molto bene di notte. Martina fa solo mattine e giusto qualche pomeriggio al mese.">${h(P.text||'')}</textarea>
   <div class="row" style="margin-top:10px"><button class="primary" data-act="persoparse">Interpreta</button><small>Versione base senza IA: capisce frasi semplici.</small></div></div>
@@ -1065,7 +1074,7 @@ Object.assign(A,{
   delhotel(v){const b=(ui.hotels||[]).find(x=>x.id===v);confirmBox(`Eliminare <b>${h(b?.name)}</b> con tutto il personale, i turni e le note? Non si può annullare.`,'Elimina',()=>run2(()=>api('dev_delete_hotel',{business_id:v}),'Hotel eliminato'),true)},
   persodept(v){ui.perso={...ui.perso,dept:v,data:null,draft:null,err:''};render()},
   persoparse(){const t=document.getElementById('perso-text').value.trim();ui.perso.text=t;if(!t)return toast('Scrivi qualcosa');
-    const ppl=employees(ui.perso.dept).filter(m=>m.id!==D.me.id);ui.perso.draft=parseNotes(t,ppl);render()},
+    const ppl=ui.perso.dept===LEAD.id?leaders():employees(ui.perso.dept).filter(m=>m.id!==D.me.id);ui.perso.draft=parseNotes(t,ppl);render()},
   draftdel(v){const[i,j]=v.split('|').map(Number);ui.perso.draft[i].rules.splice(j,1);render()},
   draftcancel(){ui.perso.draft=null;render()},
   async draftsave(){const d=ui.perso.draft;try{for(const e of d)await api('add_note',{member_id:e.person.id,text:e.text,rules:e.rules});ui.perso.draft=null;ui.perso.text='';toast('Salvato');await loadPerso()}catch(e){toast(e.message)}},
@@ -1173,7 +1182,7 @@ I.home='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width=
 const propCode=()=>(D.business.name.replace(/hotel/i,'').trim().split(/\s+/).map(w=>w[0]).join('')+'HTL').toUpperCase().slice(0,5);
 const businessDate=()=>{const t=new Date();return`${GG[t.getDay()]} ${t.getDate()} ${MESI[t.getMonth()].slice(0,3).toLowerCase()} ${t.getFullYear()}`};
 function navItems(){
-  const M=isMgr(),E=editableTeams().length>0,S=myTeams().length>0,T=!!D.me.department_id;
+  const M=isMgr(),E=editableTeams().length>0,S=persoTeams().length>0,T=!!D.me.department_id;
   return[
     {id:'dashboard',mod:'Generale',label:'Dashboard',key:'D',show:true},
     {id:'staff',mod:'Profili',label:'Profili dipendenti',key:'F',show:M},
