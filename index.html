@@ -456,7 +456,8 @@ async function loadAll(){
       sel(sb.from('months').select('month').eq('business_id',b).order('month')),
       sel(sb.from('shift_needs').select('*').eq('business_id',b))]);
     const ms=months.map(x=>x.month.slice(0,7));
-    if(!ui.month){const cur=todayStr().slice(0,7);ui.month=ms.includes(cur)?cur:(ms.find(m=>m>cur)||ms[ms.length-1]||(isMgrRole(me)?monthAdd(cur,1):cur))}
+    // si parte sempre dal mese reale di oggi (anche se non ha ancora turni)
+    if(!ui.month)ui.month=todayStr().slice(0,7);
     const from=`${ui.month}-01`,to=`${ui.month}-${pad(new Date(+ui.month.slice(0,4),+ui.month.slice(5,7),0).getDate())}`;
     const [assignments0,days,offers,notifs,log,events,pubs,locks,leaves,occ,snotes,rwins,keeps]=await Promise.all([
       sel(sb.from('assignments').select('member_id,day,code,skill').eq('business_id',b).gte('day',addD(from,-7)).lte('day',addD(to,7))),
@@ -582,12 +583,13 @@ function dayTag(id,d){
   return'';
 }
 function shiftPill(depId,c){if(c==='R')return'<span class="rest">Riposo</span>';const s=sdef(depId,c);if(!s)return`<span class="pill" style="background:#888">${h(c)}</span>`;return`<span class="pill" style="background:${s.color}">${h(s.name)}</span><small>${s.start_time}–${s.end_time}</small>`}
-function monthPicker(id,list){return`<select id="${id}" style="width:auto">${list.map(m=>`<option value="${m}" ${m===ui.month?'selected':''}>${monthLabel(m)}${D.months.includes(m)?'':' (da generare)'}</option>`).join('')}</select>`}
+const monthsAround=()=>{const cur=todayStr().slice(0,7);return[...new Set([...D.months,cur,monthAdd(cur,1),monthAdd(cur,2)])].sort()};
+function monthPicker(id,list){return`<select id="${id}" style="width:auto">${list.map(m=>`<option value="${m}" ${m===ui.month?'selected':''}>${monthLabel(m)}${D.months.includes(m)?'':editableTeams().length?' (da generare)':' (non pubblicato)'}</option>`).join('')}</select>`}
 function notGenerated(dep){dep=dep===undefined?D.me.department_id:dep;return!D.months.includes(ui.month)||(!!dep&&!canEditTeam(dep)&&!isPublished(dep))}
 V.mese=()=>{
   const me=D.me;
   if(!me.department_id)return`<h2>Il mio mese</h2><div class="card empty">Non sei assegnato a un reparto. Chiedi al responsabile.</div>`;
-  const pick=D.months.length>1?`<div class="toolbar">${monthPicker('f-month',D.months)}</div>`:'';
+  const pick=`<div class="toolbar">${monthPicker('f-month',monthsAround())}</div>`;
   if(notGenerated())return`<h2>${monthLabel(ui.month)}</h2>${pick}<div class="card empty">I turni di questo mese non sono ancora stati pubblicati.</div>`;
   const seq=seqOf(me.id),n=daysIn(),w=seq.filter(x=>x!=='R').length,today=todayStr();
   const chips=shiftsOf(me.department_id).map(s=>`<span class="chip"><i style="background:${s.color}"></i>${h(s.name)}: ${seq.filter(x=>x===s.code).length}</span>`).join('');
@@ -1300,7 +1302,7 @@ function comfortRows(){
 V.report=()=>{
   if(notGenerated())return`<h2>Report</h2><div class="card empty">Turni di ${monthLabel(ui.month)} non ancora generati.</div>`;
   const rows=comfortRows(),R0=rules();
-  return`<h2>Report turni</h2><div class="toolbar">${monthPicker('f-month',D.months)}</div>
+  return`<h2>Report turni</h2><div class="toolbar">${monthPicker('f-month',monthsAround())}</div>
   <p class="muted">Regole di comodità: almeno ${R0.restBlock??3} riposi di fila, almeno ${R0.freeWeekends??1} weekend libero, niente giorni isolati, massimo ${R0.maxConsec} giorni di fila (${exCap()} solo in casi eccezionali).</p>
   ${editableTeams().map(dp=>`<div class="card" style="overflow-x:auto"><h3>${h(dp.name)}</h3><table class="rep"><thead><tr><th>Persona</th><th>Giorni</th><th>Notti</th><th>Weekend lav.</th><th>Weekend liberi</th><th>Riposo max</th><th>Isolati</th><th>6° di fila</th></tr></thead><tbody>
   ${rows.filter(r=>r.dp.id===dp.id).map(r=>`<tr><td>${h(r.e.name)}</td><td>${r.days}</td><td>${r.nights}</td><td>${r.workW}</td><td class="${r.badWk?'bad':'good'}">${r.freeW}</td><td class="${r.badBlock?'bad':'good'}">${r.maxRest}</td><td class="${r.isolated?'bad':''}">${r.isolated}</td><td class="${r.six?'bad':''}">${r.six}</td></tr>`).join('')}</tbody></table></div>`).join('')}`;
