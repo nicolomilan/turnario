@@ -236,8 +236,9 @@ function tempPassword() {
 const cleanEmail = (e: unknown) => String(e || '').trim().toLowerCase();
 const validEmail = (e: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
-async function createAuthUser(email: string, password: string, name: string) {
-  const { data, error } = await db.auth.admin.createUser({ email, password, email_confirm: true, user_metadata: { name } });
+async function createAuthUser(email: string, password: string, name: string, mustChange = false) {
+  // con una password temporanea, al primo accesso si deve sceglierne una nuova
+  const { data, error } = await db.auth.admin.createUser({ email, password, email_confirm: true, user_metadata: { name, must_change: mustChange } });
   if (error) {
     if (/already|registered|exists/i.test(error.message)) fail(409, 'Esiste già un account con questa email.');
     fail(400, error.message);
@@ -354,7 +355,7 @@ H.add_member = async (me, p) => {
     if (!d.length) fail(400, 'Team non valido.');
   } else if (role === 'employee') fail(400, 'Scegli un team.');
   const pw = tempPassword();
-  const user = await createAuthUser(email, pw, name);
+  const user = await createAuthUser(email, pw, name, true);
   const m = await q(db.from('members').insert({ business_id: me.business_id, user_id: user.id, department_id: dept, name, email, role, job: String(p.job || '').trim() || null, skills: cleanSkills(p.skills) }).select().single()) as Member;
   await log(me.business_id, `${me.name} ha aggiunto ${name}.`);
   await sendEmail(email, 'Il tuo account Turnario', `Ciao ${name.split(' ')[0]},\n${me.name} ti ha aggiunto su Turnario.\n\nEmail: ${email}\nPassword temporanea: ${pw}\n\nAl primo accesso cambiala dal tuo profilo.`);
@@ -379,7 +380,7 @@ H.reset_password = async (me, p) => {
   const m = await q(db.from('members').select('*').eq('id', p.member_id).eq('business_id', me.business_id).single()) as Member;
   if (!m.user_id) fail(400, 'Questa persona non ha un account.');
   const pw = tempPassword();
-  const { error } = await db.auth.admin.updateUserById(m.user_id, { password: pw });
+  const { error } = await db.auth.admin.updateUserById(m.user_id, { password: pw, user_metadata: { name: m.name, must_change: true } });
   if (error) fail(400, error.message);
   await sendEmail(m.email, 'Nuova password Turnario', `La tua nuova password temporanea è: ${pw}`);
   return { ok: true, password: pw };

@@ -548,8 +548,8 @@ function vLogin(){
   <label class="f">Email<input type="email" name="email" autocomplete="username" required></label>
   <label class="f">Password<input type="password" name="password" autocomplete="current-password" required></label>
   <button class="primary" style="width:100%">Accedi</button>
-  ${typeof sb.auth.signInWithPasskey==='function'&&window.PublicKeyCredential?`<button type="button" class="ghost" style="width:100%;margin-top:10px" data-act="passkeylogin">Accedi con Face ID</button>`:''}
-  <p class="muted" style="text-align:center">Password dimenticata? Chiedi al tuo responsabile di reimpostarla.</p></form>
+  ${typeof sb.auth.signInWithPasskey==='function'&&window.PublicKeyCredential?`<button type="button" class="ghost" style="width:100%;margin-top:10px" data-act="passkeylogin">${/iPhone|iPad|Macintosh/.test(navigator.userAgent)?'Accedi con Face ID':'Accedi con passkey'}</button>`:''}
+  <p class="muted" style="text-align:center">Password dimenticata? Chiedi alla direzione: ti genera una password temporanea da cambiare al primo accesso.</p></form>
   <div class="card" style="text-align:center"><b>Sei un responsabile?</b><p class="muted">Crea l'account della tua attività e aggiungi il personale.</p><button class="ghost" data-act="go" data-v="signup">Crea la tua attività</button></div>
   <p class="muted" style="text-align:center;font-size:13px"><a href="privacy.html">Informativa privacy</a></p></div>`;
 }
@@ -1109,7 +1109,7 @@ Object.assign(A,{
     <label class="f">Team<select id="ee-dept"><option value="">— Nessuno —</option>${D.departments.map(d=>`<option value="${d.id}" ${d.id===m.department_id?'selected':''}>${h(d.name)}</option>`).join('')}</select></label>
     <label class="f">Mansioni (separate da virgola)<input id="ee-skills" list="skills-list" value="${h((m.skills||[]).join(', '))}"></label>
     ${m.id!==D.me.id?`<div class="toggle"><input type="checkbox" id="ee-admin" ${m.role==='manager'?'checked':''}><label for="ee-admin">Direzione: gestisce tutto l'hotel</label></div>`:''}`,
-    `${m.id!==D.me.id?`${m.user_id?`<button class="ghost" data-act="resetpw" data-v="${m.id}">Password</button>`:''}<button class="ghost danger" data-act="delemp" data-v="${m.id}">Rimuovi</button>`:''}<button class="primary" data-act="editempok" data-v="${m.id}">Salva</button>`)},
+    `${m.id!==D.me.id||ui.asMember?`${m.user_id?`<button class="ghost" data-act="resetpw" data-v="${m.id}">Password</button>`:''}<button class="ghost danger" data-act="delemp" data-v="${m.id}">Rimuovi</button>`:''}<button class="primary" data-act="editempok" data-v="${m.id}">Salva</button>`)},
   editempok(v){const g=id=>document.getElementById(id);const p={member_id:v,name:g('ee-name').value,job:g('ee-job').value,department_id:g('ee-dept').value||null,skills:g('ee-skills').value};if(g('ee-admin'))p.role=g('ee-admin').checked?'manager':'employee';closeModal();run(()=>api('update_member',p),'Salvato')},
   async addemp(){const g=id=>document.getElementById(id).value.trim();const nm=g('n-name'),em=g('n-email'),dp=g('n-dept'),job=g('n-job'),skills=g('n-skills');
     if(!nm)return toast('Inserisci il nome');if(!em&&!ui.dev)return toast('Inserisci l\'email');
@@ -1713,6 +1713,43 @@ Object.assign(A,{
   vchoose(){versionsSheet()},
   async unlockkeep(v){const P=ui.preview;closeModal();try{await api('unlock_keep',{id:v});toast('Sbloccato: ricalcolo…');P.keeps=P.keeps.filter(k=>k.id!==v);D.keeps=(D.keeps||[]).filter(k=>k.id!==v);await computePlan(ui.lastGen||{})}catch(e){toast(e.message)}},
 });
+</script>
+<script>
+/* ===== Mostra/nascondi password: un occhio in ogni campo password ===== */
+(function(){
+  const st=document.createElement('style');st.textContent=`
+  .pwwrap{position:relative;display:block}.pwwrap input{padding-right:48px!important;width:100%}
+  .pwbtn{position:absolute;right:4px;top:50%;transform:translateY(-50%);width:40px;height:40px;border:0;background:none;color:var(--muted);display:grid;place-items:center;border-radius:12px;cursor:pointer;padding:0;min-height:0}
+  .pwbtn:active{background:var(--accent-soft)}.pwbtn svg{width:22px;height:22px}`;document.head.appendChild(st);
+  const EYE='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+  const NOEYE='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.9 17.9A10.4 10.4 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 5.1-5.9M9.9 5.2A9.6 9.6 0 0 1 12 5c6.5 0 10 7 10 7a18.6 18.6 0 0 1-2.2 3.2M14.1 14.1a3 3 0 1 1-4.2-4.2"/><path d="M2 2l20 20"/></svg>';
+  function enhance(root){(root.querySelectorAll?root:document).querySelectorAll('input[type=password]:not([data-pw])').forEach(inp=>{
+    inp.dataset.pw='1';const w=document.createElement('span');w.className='pwwrap';inp.parentNode.insertBefore(w,inp);w.appendChild(inp);
+    const b=document.createElement('button');b.type='button';b.className='pwbtn';b.innerHTML=EYE;b.setAttribute('aria-label','Mostra la password');
+    b.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();const show=inp.type==='password';inp.type=show?'text':'password';b.innerHTML=show?NOEYE:EYE;b.setAttribute('aria-label',show?'Nascondi la password':'Mostra la password');inp.focus({preventScroll:true})});
+    w.appendChild(b)})}
+  new MutationObserver(ms=>{for(const m of ms)for(const n of m.addedNodes)if(n.nodeType===1)enhance(n)}).observe(document.body,{childList:true,subtree:true});
+  enhance(document);
+})();
+</script>
+<script>
+/* ===== Password temporanea: al primo accesso se ne sceglie una nuova ===== */
+function forcePwCheck(){
+  const u=session&&session.user;if(!u||ui.view!=='app'||ui.asMember||!(u.user_metadata&&u.user_metadata.must_change)||document.getElementById('force-pw'))return;
+  const o=document.createElement('div');o.id='force-pw';o.style.cssText='position:fixed;inset:0;z-index:200;display:grid;place-items:center;padding:20px;background:rgba(0,0,0,.45);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)';
+  o.innerHTML=`<form class="card" style="max-width:420px;width:100%"><h3>Scegli la tua password</h3><p class="muted">Stai usando una password temporanea. Scegline una tua per continuare: la saprai solo tu.</p>
+    <label class="f">Nuova password<input type="password" id="fp1" minlength="8" autocomplete="new-password" required placeholder="Almeno 8 caratteri"></label>
+    <label class="f">Ripetila<input type="password" id="fp2" minlength="8" autocomplete="new-password" required></label>
+    <div class="err" id="fperr" style="display:none"></div><button class="primary" style="width:100%">Salva e continua</button></form>`;
+  document.body.appendChild(o);
+  o.querySelector('form').addEventListener('submit',async e=>{e.preventDefault();const a=o.querySelector('#fp1').value,b=o.querySelector('#fp2').value,er=o.querySelector('#fperr');
+    const show=t=>{er.textContent=t;er.style.display=''};
+    if(a.length<8)return show('Almeno 8 caratteri.');if(a!==b)return show('Le due password non coincidono.');if(/^Turni-/.test(a))return show('Scegline una diversa da quella temporanea.');
+    const{data,error}=await sb.auth.updateUser({password:a,data:{must_change:false}});if(error)return show(error.message);
+    if(data&&data.user)session={...session,user:data.user};o.remove();toast('Password salvata')});
+}
+const _renderPw=render;
+render=function(){_renderPw.apply(this,arguments);try{forcePwCheck()}catch(e){}};
 </script>
 
 
