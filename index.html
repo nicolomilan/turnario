@@ -400,6 +400,10 @@ const canEditMember=id=>{const m=mem(id);return !!m&&canEditTeam(m.department_id
 // pubblicazione: un mese in bozza lo vedono solo la direzione e chi fa i turni del team
 const isPublished=(depId,month=ui.month)=>(D.pubs||[]).some(p=>p.department_id===depId&&p.month.slice(0,7)===month);
 const isLocked=(id,d)=>D.locks&&D.locks.has(id+'|'+dateOf(d));
+// "rifacciamo i turni": raccolta dei giorni da tenere
+const winOpen=w=>w&&!w.closed_at&&!w.applied_at&&Date.parse(w.closes_at)>Date.now();
+const winOf=depId=>(D.rwins||[]).find(w=>w.department_id===depId&&!w.applied_at);
+const keepOf=(id,d)=>(D.keeps||[]).find(k=>k.member_id===id&&k.day===(typeof d==='number'?dateOf(d):d)&&(D.rwins||[]).some(w=>w.id===k.window_id&&!w.applied_at));
 // ferie, permessi e malattia approvati
 const LVL={ferie:['Fe','Ferie'],permesso:['Pe','Permesso'],malattia:['Ma','Malattia']};
 const leaveOn=(id,d)=>{const ds=typeof d==='number'?dateOf(d):d;return(D.leaves||[]).find(l=>l.member_id===id&&l.status==='approved'&&l.date_from<=ds&&l.date_to>=ds)};
@@ -454,7 +458,7 @@ async function loadAll(){
     const ms=months.map(x=>x.month.slice(0,7));
     if(!ui.month){const cur=todayStr().slice(0,7);ui.month=ms.includes(cur)?cur:(ms.find(m=>m>cur)||ms[ms.length-1]||(isMgrRole(me)?monthAdd(cur,1):cur))}
     const from=`${ui.month}-01`,to=`${ui.month}-${pad(new Date(+ui.month.slice(0,4),+ui.month.slice(5,7),0).getDate())}`;
-    const [assignments0,days,offers,notifs,log,events,pubs,locks,leaves,occ,snotes]=await Promise.all([
+    const [assignments0,days,offers,notifs,log,events,pubs,locks,leaves,occ,snotes,rwins,keeps]=await Promise.all([
       sel(sb.from('assignments').select('member_id,day,code,skill').eq('business_id',b).gte('day',addD(from,-7)).lte('day',addD(to,7))),
       sel(sb.from('request_days').select('*').eq('business_id',b).gte('day',from).lte('day',to)),
       sel(sb.from('offers').select('*').eq('business_id',b).or(`and(day.gte.${from},day.lte.${to}),status.eq.pending`)),
@@ -465,10 +469,12 @@ async function loadAll(){
       sel(sb.from('cell_locks').select('member_id,day').eq('business_id',b).gte('day',from).lte('day',to)),
       sel(sb.from('leaves').select('*').eq('business_id',b).lte('date_from',to).gte('date_to',from)),
       sel(sb.from('occupancy').select('day,rooms').eq('business_id',b).gte('day',from).lte('day',to)),
-      sel(sb.from('shift_notes').select('*').eq('business_id',b).gte('day',addD(from,-7)).lte('day',addD(to,7)).order('created_at',{ascending:false}))]);
+      sel(sb.from('shift_notes').select('*').eq('business_id',b).gte('day',addD(from,-7)).lte('day',addD(to,7)).order('created_at',{ascending:false})),
+      sel(sb.from('rework_windows').select('*').eq('business_id',b).eq('month',ui.month+'-01').order('created_at',{ascending:false})),
+      sel(sb.from('keep_days').select('*').eq('business_id',b).gte('day',ui.month+'-01').lte('day',ui.month+'-31'))]);
     const reqIds=[...new Set(days.map(x=>x.request_id).concat(offers.map(o=>o.request_id)))];
     const requests=reqIds.length?await sel(sb.from('requests').select('*').in('id',reqIds).order('created_at',{ascending:false})):[];
-    D={me,business,departments,shifts,members,months:ms,assignments:assignments0,days,offers,notifs,log,requests,needs,events,pubs,leaves,occ:new Map(occ.map(o=>[o.day,o.rooms])),snotes,locks:new Set(locks.map(l=>l.member_id+'|'+l.day))};
+    D={me,business,departments,shifts,members,months:ms,assignments:assignments0,days,offers,notifs,log,requests,needs,events,pubs,leaves,occ:new Map(occ.map(o=>[o.day,o.rooms])),snotes,rwins,keeps,locks:new Set(locks.map(l=>l.member_id+'|'+l.day))};
     // (serve per "Vedi come": il server già nasconde le bozze a chi non fa i turni)
     D.assignments=assignments0.filter(a=>{const m=mem(a.member_id);return !m||canEditTeam(m.department_id)||isPublished(m.department_id,a.day.slice(0,7))});
     if(ui.preview&&ui.preview.month!==ui.month)ui.preview=null;
@@ -587,11 +593,15 @@ V.mese=()=>{
   const chips=shiftsOf(me.department_id).map(s=>`<span class="chip"><i style="background:${s.color}"></i>${h(s.name)}: ${seq.filter(x=>x===s.code).length}</span>`).join('');
   const nx=seq.findIndex((c,d)=>c!=='R'&&dateOf(d)>=today),ns=nx>=0&&sdef(me.department_id,seq[nx]);
   const hero=ns?`<div class="next" style="--c:${ns.color}"><small>${dateOf(nx)===today?'Oggi':'Prossimo turno'}</small><b>${fmt(nx)}</b><span>${h(ns.name)} · ${ns.start_time}–${ns.end_time}</span></div>`:'';
+  const W=winOf(me.department_id),WO=winOpen(W),mine=W?(D.keeps||[]).filter(k=>k.window_id===W.id&&k.member_id===me.id).length:0;
+  const wbar=W?`<div class="card" style="background:var(--warn-soft)"><h3>Si rifanno i turni dal ${fmtS(W.from_day)}</h3><p class="muted" style="margin:0 0 6px">${W.reason?h(W.reason)+'. ':''}${WO?`Tocca <b>Tieni</b> sui giorni (riposi o turni) che non vuoi cambiare, entro <b>${new Date(W.closes_at).toLocaleString('it-IT',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</b>. Ferie e richieste approvate restano già bloccate.`:'La raccolta è chiusa: il responsabile sta preparando i nuovi turni.'}</p><small>Hai tenuto ${mine} ${mine===1?'giorno':'giorni'}${W.max_per_person!=null?` su ${W.max_per_person}`:''}.</small></div>`:'';
   const rows=seq.map((c,d)=>{const ds=dateOf(d),tag=dayTag(me.id,d),past=ds<today;
+    const inW=W&&ds>=W.from_day&&!past,kp=inW&&keepOf(me.id,d),fixedAlready=inW&&(leaveOn(me.id,d)||tag);
+    const keepBtn=inW?(fixedAlready?'<span class="tag">Già bloccato</span>':kp?`<button class="primary sm" ${WO?`data-act="keep" data-v="${ds}|0"`:'disabled'}>📌 Tenuto</button>`:WO?`<button class="ghost sm" data-act="keep" data-v="${ds}|1">Tieni</button>`:''):null;
     const lv=leaveOn(me.id,d),hn=holidayName(ds);
     const evt=(lv?`<span class="tag info">${LVL[lv.kind][1]}</span>`:'')+(hn?`<span class="tag bad">${h(hn)}</span>`:'')+eventsOn(ds).map(e=>`<span class="tag ev-${e.impact}">${h(e.name)}</span>`).join('');
-    return`${d===0||dow(d)===1?`<div class="wk">Settimana del ${d+1}</div>`:''}<div class="day ${isWe(d)?'we':''} ${past?'past':''} ${ds===today?'today':''}"><div class="dd"><small>${GG[dow(d)]}</small><b>${d+1}</b></div><div class="ds">${shiftPill(me.department_id,c)}${tag}${evt}</div>${c!=='R'&&!tag&&!past?`<div class="row" style="gap:6px;flex-wrap:nowrap"><button class="ghost sm" data-act="swapopt" data-v="${d}">Scambia</button><button class="ghost sm" data-act="quickreq" data-v="${d}">Chiedi libero</button></div>`:''}</div>`}).join('');
-  return`<h2>${monthLabel(ui.month)}</h2>${pick}${hero}<div class="row" style="margin:0 0 12px"><button class="ghost sm" data-act="tab" data-v="ferie">Ferie e permessi</button><button class="ghost sm danger" data-act="absentme">Sono malato/a</button></div><div class="stats"><div><b>${w}</b><small>giorni di lavoro</small></div><div><b>${n-w}</b><small>riposi</small></div><div><b>${target()}</b><small>monte giorni</small></div></div><div class="chips">${chips}</div><div class="days">${rows}</div>`;
+    return`${d===0||dow(d)===1?`<div class="wk">Settimana del ${d+1}</div>`:''}<div class="day ${isWe(d)?'we':''} ${past?'past':''} ${ds===today?'today':''}"><div class="dd"><small>${GG[dow(d)]}</small><b>${d+1}</b></div><div class="ds">${shiftPill(me.department_id,c)}${tag}${evt}</div>${keepBtn!=null?keepBtn:c!=='R'&&!tag&&!past?`<div class="row" style="gap:6px;flex-wrap:nowrap"><button class="ghost sm" data-act="swapopt" data-v="${d}">Scambia</button><button class="ghost sm" data-act="quickreq" data-v="${d}">Chiedi libero</button></div>`:''}</div>`}).join('');
+  return`<h2>${monthLabel(ui.month)}</h2>${pick}${wbar}${hero}<div class="row" style="margin:0 0 12px"><button class="ghost sm" data-act="tab" data-v="ferie">Ferie e permessi</button><button class="ghost sm danger" data-act="absentme">Sono malato/a</button></div><div class="stats"><div><b>${w}</b><small>giorni di lavoro</small></div><div><b>${n-w}</b><small>riposi</small></div><div><b>${target()}</b><small>monte giorni</small></div></div><div class="chips">${chips}</div><div class="days">${rows}</div>`;
 };
 V.richiedi=()=>{
   const me=D.me,n=daysIn(),today=todayStr();
@@ -669,7 +679,7 @@ function grid(depId,{editable=false,meId=null}={}){
     +(days.some(d=>occPct(d)!=null)?`<tr class="occrow"><td class="sticky">Occ. %</td>${days.map(d=>{const p=occPct(d);return`<td class="${p==null?'':p>=85?'hi':p<=40?'lo':''}">${p==null?'':p}</td>`}).join('')}<td></td></tr>`:'');
   const rows=emps.map(e=>{const seq=seqOf(e.id),vf=violFlagsCtx(e.id,depId),sf=softFlagsCtx(e.id);
     return`<tr class="${e.id===meId?'me':''}"><td class="sticky">${h(e.name)}</td>${seq.map((c,d)=>{const s=sdef(depId,c);
-      return`<td class="c ${c==='R'?'R':''} ${editable?'edit':''} ${vf[d]?'viol':sf[d]?'exc':''} ${c==='R'&&isWe(d)?'we':''}" ${s?`style="--c:${s.color}"`:''} ${editable?`data-act="cell" data-v="${e.id}|${d}"`:''}><span>${c==='R'?(leaveOn(e.id,d)?`<em class="lv">${LVL[leaveOn(e.id,d).kind][0]}</em>`:'·'):h(c)}</span>${editable&&isLocked(e.id,d)?'<i class="lk"></i>':''}</td>`}).join('')}<td><b>${seq.filter(x=>x!=='R').length}</b></td></tr>`}).join('');
+      return`<td class="c ${c==='R'?'R':''} ${editable?'edit':''} ${vf[d]?'viol':sf[d]?'exc':''} ${c==='R'&&isWe(d)?'we':''}" ${s?`style="--c:${s.color}"`:''} ${editable?`data-act="cell" data-v="${e.id}|${d}"`:''}><span>${c==='R'?(leaveOn(e.id,d)?`<em class="lv">${LVL[leaveOn(e.id,d).kind][0]}</em>`:'·'):h(c)}</span>${editable&&isLocked(e.id,d)?'<i class="lk"></i>':''}${editable&&keepOf(e.id,d)?'<i class="kp"></i>':''}</td>`}).join('')}<td><b>${seq.filter(x=>x!=='R').length}</b></td></tr>`}).join('');
   const cov=covRows(depId,emps,days).map(r=>`<tr class="cov"><td class="sticky">${h(r.label)}</td>${r.cells.map(c=>c?`<td class="${c.k<c.need?'short':''}">${c.k}/${c.need}</td>`:'<td>–</td>').join('')}<td></td></tr>`).join('');
   return`<div class="gridwrap"><table class="grid"><thead>${head}</thead><tbody>${rows}${cov}</tbody></table></div>
   <div class="legend">${sh.map(s=>`<span class="chip"><i style="background:${s.color}"></i><b>${h(s.code)}</b> ${h(s.name)} ${s.start_time}–${s.end_time}</span>`).join('')}<span class="chip">· Riposo</span></div>`;
@@ -1387,8 +1397,8 @@ function versionsSheet(){
 }
 async function computePlan(opts){
   const depId=ui.dept;
-  try{const r=await api('generate',{month:ui.month,department_id:depId,...opts});
-    ui.preview={dept:depId,month:ui.month,draft:r.draft_id,variants:r.variants,key:r.variants[0].key,from:Number(r.from.slice(8,10))-1,locked:r.locked,memberIds:teamMembersOf([depId]),hasCur:r.variants.some(v=>v.key==='stable')};
+  ui.lastGen=opts;try{const r=await api('generate',{month:ui.month,department_id:depId,...opts});
+    ui.preview={dept:depId,month:ui.month,draft:r.draft_id,variants:r.variants,key:r.variants[0].key,from:Number(r.from.slice(8,10))-1,locked:r.locked,keeps:r.keeps||[],memberIds:teamMembersOf([depId]),hasCur:r.variants.some(v=>v.key==='stable')};
     render();versionsSheet();
   }catch(e){toast(e.message)}
 }
@@ -1650,6 +1660,61 @@ V.regole=()=>{const html=_regole();if(!isMgr())return html;
   <div class="row"><button class="ghost sm" data-act="exportall">Scarica il backup (JSON)</button><button class="ghost sm" data-act="exportcsv">Turni del mese (CSV per Excel)</button></div>
   <p class="muted" style="font-size:13px;margin-top:10px"><a href="privacy.html" target="_blank" rel="noopener">Informativa privacy</a> · conservazione: turni e storico per 24 mesi, poi eliminabili.</p></div>`};
 </script>
+<script>
+/* ===== Rifacciamo i turni: raccolta dei giorni da tenere ===== */
+(function(){const st=document.createElement('style');st.textContent=`
+.grid td.c i.kp{position:absolute;bottom:2px;left:2px;width:7px;height:7px;border-radius:50%;background:var(--warn,#D97706);box-shadow:0 0 0 1.5px var(--card,#fff)}
+.rw .ppl{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.rw .ppl span{font-size:12px;padding:4px 9px;border-radius:999px;background:var(--accent-soft)}
+.rw .ppl span.no{opacity:.5}
+.blk{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--line,rgba(0,0,0,.08))}
+`;document.head.appendChild(st)})();
+function reworkCard(depId){
+  const W=winOf(depId);if(!W)return'';const O=winOpen(W),emps=employees(depId).filter(e=>e.id!==D.me.id||true);
+  const ks=(D.keeps||[]).filter(k=>k.window_id===W.id),by=id=>ks.filter(k=>k.member_id===id).length;
+  const done=emps.filter(e=>by(e.id)>0).length,when=new Date(W.closes_at).toLocaleString('it-IT',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+  return`<div class="card rw" style="background:var(--warn-soft)"><h3>${O?'Raccolta dei giorni da tenere':'Raccolta chiusa'}</h3>
+   <p class="muted" style="margin:0">Dal ${fmtS(W.from_day)}${W.reason?' · '+h(W.reason):''} · ${O?`chiude ${when}`:'pronta per rigenerare'} · ${ks.length} giorni tenuti${W.max_per_person!=null?` (max ${W.max_per_person} a testa)`:''}</p>
+   <div class="ppl">${emps.map(e=>`<span class="${by(e.id)?'':'no'}">${h(e.name.split(' ')[0])}${by(e.id)?' · '+by(e.id):''}</span>`).join('')}</div>
+   <small class="muted">${done} su ${emps.length} hanno segnato almeno un giorno. Nella griglia il pallino arancio indica un giorno tenuto.</small>
+   <div class="row" style="margin-top:10px">${O?`<button class="ghost sm" data-act="rwcancel" data-v="${W.id}">Annulla raccolta</button><button class="primary sm" data-act="rwclose" data-v="${W.id}">Chiudi ora</button>`:`<button class="ghost sm" data-act="rwcancel" data-v="${W.id}">Annulla</button><button class="primary sm" data-act="rwgen" data-v="${W.from_day}">Rigenera con i giorni tenuti</button>`}</div></div>`;
+}
+const _turniRw=V.turni;
+V.turni=()=>{const html=_turniRw();if(ui.preview||!D.departments.length||!editableTeams().length)return html;
+  const i=html.indexOf('<div class="toolbar">');if(i<0)return html;
+  const btn=winOf(ui.dept)?'':'<button class="ghost sm" data-act="rwopen">Rifai i turni…</button>';
+  return html.slice(0,i)+reworkCard(ui.dept)+html.slice(i).replace('data-act="regenopt">Rigenera…</button>','data-act="regenopt">Rigenera…</button>'+btn)};
+// nei confronti delle versioni: quali giorni tenuti impediscono di coprire i turni
+function keepBlockers(){const P=ui.preview;if(!P||!(P.keeps||[]).length)return[];
+  return withPreview(()=>{const emps=employees(P.dept),days=[...Array(daysIn()).keys()],bad=new Set();
+    covRows(P.dept,emps,days).forEach(r=>r.cells.forEach((c,i)=>{if(c&&c.need>c.k)bad.add(dateOf(days[i]))}));
+    return P.keeps.filter(k=>bad.has(k.day))})}
+const _vs=versionsSheet;
+versionsSheet=function(){_vs();const P=ui.preview;if(!P)return;const bl=keepBlockers();const box=document.querySelector('#modal .box');if(!box||!bl.length)return;
+  const html=`<div class="vcard" style="border-color:var(--bad)"><h4>Giorni tenuti nei giorni scoperti</h4><p>Con "${h(P.variants.find(x=>x.key===P.key).label)}" restano turni scoperti in giorni che qualcuno ha chiesto di tenere. Se ne sblocchi uno ricalcolo subito; la persona riceve un avviso.</p>
+   ${bl.map(k=>`<div class="blk"><span><b>${h(name(k.member_id))}</b> · ${fmtS(k.day)} · ${k.code==='R'?'riposo':h((sdef(P.dept,k.code)||{}).name||k.code)}</span><button class="ghost sm" data-act="unlockkeep" data-v="${k.id}">Sblocca</button></div>`).join('')}</div>`;
+  const first=box.querySelector('.vcard');if(first)first.insertAdjacentHTML('beforebegin',html)};
+Object.assign(A,{
+  async keep(v){const[day,on]=v.split('|');const W=winOf(D.me.department_id);if(!W)return;
+    const prev=[...(D.keeps||[])];if(on==='1')D.keeps.push({id:'tmp',window_id:W.id,member_id:D.me.id,day,code:'?'});else D.keeps=D.keeps.filter(k=>!(k.window_id===W.id&&k.member_id===D.me.id&&k.day===day));render();
+    try{await api('set_keep',{window_id:W.id,day,keep:on==='1'});scheduleReload()}catch(e){D.keeps=prev;render();toast(e.message)}},
+  rwopen(){const n=daysIn(),t=todayIdx(),def=Math.max(0,t);
+    modal(`<h3>Rifai i turni di ${h(dept(ui.dept).name)}</h3><p class="muted">Per grandi cambiamenti (corsi, nuovo personale, uscite). Il team riceve una notifica e segna i giorni che vuole tenere, riposi o turni. Restano bloccati anche ferie e richieste approvate; tutto il resto si potrà ricalcolare.</p>
+    <label class="f">Da che giorno<select id="rw-from">${[...Array(n).keys()].map(d=>`<option value="${dateOf(d)}" ${d===def?'selected':''} ${t>0&&d<t?'disabled':''}>${fmt(d)}</option>`).join('')}</select></label>
+    <div class="two"><label class="f">Tempo per rispondere<select id="rw-h"><option value="24">24 ore</option><option value="48" selected>48 ore</option><option value="72">3 giorni</option><option value="168">7 giorni</option></select></label>
+    <label class="f">Giorni max a testa<input type="number" id="rw-max" min="0" max="31" placeholder="Nessun limite"></label></div>
+    <label class="f">Motivo (lo vede il team, facoltativo)<input id="rw-reason" maxlength="200" placeholder="Es. corso antincendio per 3 colleghi"></label>`,
+    `<button class="ghost" data-act="mclose">Annulla</button><button class="primary" data-act="rwopengo">Apri la raccolta</button>`)},
+  async rwopengo(){const g=id=>document.getElementById(id).value;const body={month:ui.month,department_id:ui.dept,from:g('rw-from'),hours:+g('rw-h'),max_per_person:g('rw-max'),reason:g('rw-reason').trim()};closeModal();
+    await run(()=>api('open_rework',body),'Raccolta aperta: il team è stato avvisato')},
+  rwclose(v){confirmBox('Chiudere adesso la raccolta? Chi non ha ancora segnato i giorni non potrà più farlo.','Chiudi',()=>run(()=>api('close_rework',{window_id:v}),'Raccolta chiusa'))},
+  rwcancel(v){confirmBox('Annullare la raccolta? I giorni segnati dal team non verranno usati.','Annulla raccolta',()=>run(()=>api('close_rework',{window_id:v,cancel:true}),'Raccolta annullata'),true)},
+  rwgen(v){computePlan({from:v})},
+  vchoose(){versionsSheet()},
+  async unlockkeep(v){const P=ui.preview;closeModal();try{await api('unlock_keep',{id:v});toast('Sbloccato: ricalcolo…');P.keeps=P.keeps.filter(k=>k.id!==v);D.keeps=(D.keeps||[]).filter(k=>k.id!==v);await computePlan(ui.lastGen||{})}catch(e){toast(e.message)}},
+});
+</script>
+
 
 
 

@@ -453,7 +453,10 @@ H.generate = async (me, p) => {
   const cur: Record<string, string[]> = {}, curSk: Record<string, (string | null)[]> = {};
   members.forEach((m: any) => { cur[m.id] = Array(n).fill('R'); curSk[m.id] = Array(n).fill(null); });
   asg.forEach((a: any) => { if (cur[a.member_id]) { cur[a.member_id][idxOf(a.day)] = a.code; curSk[a.member_id][idxOf(a.day)] = a.skill; } });
-  const lockSet = new Set([...locks, ...reqLocks].map((l: any) => `${l.member_id}|${idxOf(l.day)}`));
+  // giorni da tenere segnati dalle persone nella raccolta "rifacciamo i turni" (ancora da applicare)
+  const wins = await q(db.from('rework_windows').select('id').eq('business_id', b).eq('month', first0).is('applied_at', null)) as any[];
+  const keeps = wins.length ? await q(db.from('keep_days').select('id,member_id,day,code').in('window_id', wins.map((w: any) => w.id))) as any[] : [];
+  const lockSet = new Set([...locks, ...reqLocks, ...keeps].map((l: any) => `${l.member_id}|${idxOf(l.day)}`));
   // ferie e malattie approvate: riposo fisso e monte giorni ridotto in proporzione
   const lv = await leaveDays(b, first0, last0), leaveBy: Record<string, number> = {};
   lv.forEach((_k, key) => { const [id] = key.split('|'); leaveBy[id] = (leaveBy[id] || 0) + 1; });
@@ -499,7 +502,7 @@ H.generate = async (me, p) => {
   await db.from('plan_drafts').delete().eq('business_id', b).eq('created_by', me.id);
   const draft = await q(db.from('plan_drafts').insert({ business_id: b, month: first0, scope, variants, created_by: me.id }).select('id').single()) as any;
   const pubs = await q(db.from('publications').select('department_id').eq('month', first0).in('department_id', scope.depts)) as any[];
-  return { ok: true, draft_id: draft.id, from: dateOf(month, fromIdx), locked, published: pubs.length === scope.depts.length, partial: pubs.length > 0 && pubs.length < scope.depts.length,
+  return { ok: true, draft_id: draft.id, from: dateOf(month, fromIdx), locked, keeps: keeps.filter((k: any) => members.some((m: any) => m.id === k.member_id)), published: pubs.length === scope.depts.length, partial: pubs.length > 0 && pubs.length < scope.depts.length,
     variants: variants.map((v) => ({ key: v.key, label: v.label, hint: v.hint, metrics: v.metrics, rows: v.rows })) };
 };
 
@@ -541,6 +544,10 @@ H.apply_plan = async (me, p) => {
   for (let i = 0; i < logs.length; i += 500) await q(db.from('change_log').insert(logs.slice(i, i + 500)));
   await q(db.from('months').upsert({ business_id: b, month: dateOf(month, 0), generated_at: new Date().toISOString() }));
   await db.from('plan_drafts').delete().eq('id', dr.id);
+  // la raccolta dei giorni da tenere è servita: si chiude
+  const nowIso = new Date().toISOString();
+  await db.from('rework_windows').update({ applied_at: nowIso }).in('department_id', depts).eq('month', dateOf(month, 0)).is('applied_at', null);
+  await db.from('rework_windows').update({ closed_at: nowIso }).in('department_id', depts).eq('month', dateOf(month, 0)).is('closed_at', null);
   const [y, mo] = month.split('-').map(Number), label = `${MESI[mo - 1]} ${y}`;
   const pubs = new Set((await q(db.from('publications').select('department_id').eq('month', dateOf(month, 0)).in('department_id', depts)) as any[]).map((x) => x.department_id));
   for (const m of members) if (touched[m.id] && pubs.has(m.department_id)) await notify(m, `I tuoi turni di ${label} sono cambiati (${touched[m.id]} ${touched[m.id] === 1 ? 'giorno' : 'giorni'}).`, `Turnario: turni di ${label} aggiornati`);
@@ -858,6 +865,66 @@ H.handled_day = async (me, p) => {
   await q(db.from('request_days').update({ status: 'handled' }).eq('id', p.request_day_id));
   return { ok: true };
 };
+/* ---------- Rifacciamo i turni: ognuno segna i giorni da tenere ---------- */
+async function openWindow(me: Me, id: string) {
+  const w = (await q(db.from('rework_windows').select('*').eq('id', id).eq('business_id', me.business_id)) as any[])[0];
+  if (!w) fail(404, 'Raccolta non trovata.');
+  return w;
+}
+const windowOpen = (w: any) => !w.closed_at && !w.applied_at && Date.parse(w.closes_at) > Date.now();
+H.open_rework = async (me, p) => {
+  if (!isMonth(p.month)) fail(400, 'Mese non valido.');
+  const dp = await needTeamEditor(me, p.department_id);
+  const today = new Date().toISOString().slice(0, 10), first0 = dateOf(p.month, 0), last0 = dateOf(p.month, daysIn(p.month) - 1);
+  let from = isDate(p.from) && p.from >= first0 && p.from <= last0 ? p.from : first0;
+  if (from < today) from = today > last0 ? last0 : today;
+  const hours = Math.max(1, Math.min(168, Math.round(Number(p.hours) || 48)));
+  const max = p.max_per_person === '' || p.max_per_person == null ? null : Math.max(0, Math.min(31, Math.round(Number(p.max_per_person))));
+  const open = (await q(db.from('rework_windows').select('*').eq('department_id', dp.id).eq('month', first0).is('applied_at', null)) as any[]).filter(windowOpen);
+  if (open.length) fail(409, 'C\'è già una raccolta aperta per questo mese.');
+  const closes = new Date(Date.now() + hours * 3600e3).toISOString();
+  const w = await q(db.from('rework_windows').insert({ business_id: me.business_id, department_id: dp.id, month: first0, from_day: from, closes_at: closes, max_per_person: max, reason: String(p.reason || '').slice(0, 200) || null, created_by: me.id }).select().single()) as any;
+  const [y, mo] = p.month.split('-').map(Number), label = `${MESI[mo - 1]} ${y}`;
+  const when = new Date(closes).toLocaleString('it-IT', { timeZone: 'Europe/Rome', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+  const ms = await q(db.from('members').select('*').eq('department_id', dp.id).eq('active', true)) as Member[];
+  for (const m of ms) if (m.id !== me.id) await notify(m, `Si rifanno i turni di ${label} dal ${fmt(from)}${w.reason ? ` (${w.reason})` : ''}. Entro ${when} segna nel tuo mese i giorni che vuoi tenere: tutto il resto potrà cambiare.`, `Turnario: segna i giorni da tenere entro ${when}`);
+  await log(me.business_id, `${me.name} ha aperto la raccolta dei giorni da tenere per ${dp.name}, ${label} dal ${fmt(from)}.`);
+  return { ok: true, id: w.id };
+};
+H.set_keep = async (me, p) => {
+  needMember(me);
+  const w = await openWindow(me, p.window_id);
+  if (me.department_id !== w.department_id) fail(403, 'Questa raccolta non è per il tuo team.');
+  if (!windowOpen(w)) fail(409, 'La raccolta è chiusa.');
+  if (!isDate(p.day) || p.day < w.from_day || monthOf(p.day) !== String(w.month).slice(0, 7)) fail(400, 'Giorno fuori dal periodo da rifare.');
+  if (p.keep === false) { await q(db.from('keep_days').delete().eq('window_id', w.id).eq('member_id', me.id).eq('day', p.day)); return { ok: true }; }
+  if (w.max_per_person != null) {
+    const n = (await q(db.from('keep_days').select('id').eq('window_id', w.id).eq('member_id', me.id)) as any[]).length;
+    if (n >= w.max_per_person) fail(409, `Puoi tenere al massimo ${w.max_per_person} giorni.`);
+  }
+  const a = (await q(db.from('assignments').select('code,skill').eq('member_id', me.id).eq('day', p.day)) as any[])[0];
+  await q(db.from('keep_days').upsert({ window_id: w.id, business_id: me.business_id, member_id: me.id, day: p.day, code: a?.code || 'R', skill: a?.skill ?? null }, { onConflict: 'window_id,member_id,day' }));
+  return { ok: true };
+};
+H.close_rework = async (me, p) => {
+  const w = await openWindow(me, p.window_id);
+  await needTeamEditor(me, w.department_id);
+  await q(db.from('rework_windows').update(p.cancel ? { closed_at: new Date().toISOString(), applied_at: new Date().toISOString() } : { closed_at: new Date().toISOString() }).eq('id', w.id));
+  return { ok: true };
+};
+// il responsabile sblocca un giorno che impedisce di coprire i turni: la persona viene avvisata
+H.unlock_keep = async (me, p) => {
+  needMember(me);
+  const k = (await q(db.from('keep_days').select('*').eq('id', p.id).eq('business_id', me.business_id)) as any[])[0];
+  if (!k) fail(404, 'Blocco non trovato.');
+  const m = await q(db.from('members').select('*').eq('id', k.member_id).single()) as Member;
+  await needTeamEditor(me, m.department_id);
+  await q(db.from('keep_days').delete().eq('id', k.id));
+  await notify(m, `Per coprire tutti i turni ${first(me)} ha dovuto sbloccare il tuo ${fmt(k.day)}${p.reason ? `: ${String(p.reason).slice(0, 150)}` : ''}. Ti avviso quando i nuovi turni sono pronti.`, `Turnario: sbloccato il tuo ${fmt(k.day)}`);
+  await log(me.business_id, `${me.name} ha sbloccato il giorno da tenere di ${m.name} (${fmt(k.day)}).`);
+  return { ok: true };
+};
+
 /* ---------- Occupazione prevista (importata dal PMS o scritta a mano) ---------- */
 H.save_occupancy = async (me, p) => {
   needMember(me);
