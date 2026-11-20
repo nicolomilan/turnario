@@ -871,7 +871,7 @@ function vDevBoot(){
 }
 function renderDev(){
   const app=document.getElementById('app'),H=ui.hotels||[];
-  app.innerHTML=`<header class="top"><div class="brand">${LOGO}<span>Turnario</span><small>· Sviluppatore</small></div><div class="who"><button class="ghost sm" data-act="logout">Esci</button></div></header>
+  app.innerHTML=`<header class="top"><div class="brand">${LOGO}<span>Turnario</span><small>· Sviluppatore</small></div><div class="who"><button class="ghost sm" data-act="devprofile">Profilo</button><button class="ghost sm" data-act="logout">Esci</button></div></header>
   <main><h2>Hotel</h2>
   <div class="row" style="margin-bottom:10px"><input id="map-q" class="grow" style="width:auto" placeholder="Cerca un luogo o un hotel (es. Rimini)"><button class="ghost" data-act="mapsearch">Cerca</button></div>
   <div id="map"></div>
@@ -1754,6 +1754,15 @@ function forcePwCheck(){
 }
 const _renderPw=render;
 render=function(){_renderPw.apply(this,arguments);try{forcePwCheck()}catch(e){}};
+</script>
+<script>
+/* ===== Profilo dell'account sviluppatore: Face ID e password ===== */
+A.devprofile=function(){
+  const pk=typeof sb.auth.registerPasskey==='function'&&window.PublicKeyCredential,apple=/iPhone|iPad|Macintosh/.test(navigator.userAgent);
+  modal(`<h3>Il tuo account</h3><p class="muted">${h((session&&session.user&&session.user.email)||'')} · Sviluppatore</p>
+    ${pk?`<div class="info" style="margin:4px 0 14px"><b>Accesso con ${apple?'Face ID':'passkey'}</b><br>Niente password: entri con il volto o l'impronta.${hasPasskeyHere()?'<br><small>Già attivo su questo dispositivo.</small>':''}<div class="row" style="margin-top:10px"><button class="ghost sm" data-act="passkeyadd">${hasPasskeyHere()?'Aggiungi di nuovo':'Attiva '+(apple?'Face ID':'passkey')}</button></div></div>`:''}
+    <label class="f">Nuova password<input type="password" id="p-new" minlength="8" autocomplete="new-password" placeholder="Almeno 8 caratteri"></label>`,
+    `<button class="ghost danger" data-act="logout">Esci</button><button class="ghost" data-act="mclose">Chiudi</button><button class="primary" data-act="chpw">Cambia password</button>`)};
 </script>
 
 
