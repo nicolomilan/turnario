@@ -332,7 +332,7 @@ function showFatal(msg){
   app.innerHTML=`<div class="auth"><div class="hero"><h1 style="font-size:30px">Qualcosa non è partito</h1><p>${String(msg||'Errore sconosciuto').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</p><p style="font-size:13px;opacity:.7">Passaggio: ${BOOT.step}</p></div>
   <div class="card" style="display:grid;gap:10px"><button class="primary" onclick="location.reload()">Riprova</button><button class="ghost" onclick="hardLogout()">Esci e rientra</button></div></div>`;
 }
-function hardLogout(){try{Object.keys(localStorage).filter(k=>k.startsWith('sb-')||k.startsWith('turnario:')).forEach(k=>localStorage.removeItem(k))}catch(e){}
+function hardLogout(){try{Object.keys(localStorage).filter(k=>k.startsWith('sb-')||(k.startsWith('turnario:')&&k!=='turnario:passkey')).forEach(k=>localStorage.removeItem(k))}catch(e){}
   const go=()=>{location.href=location.pathname};
   try{Promise.all([navigator.serviceWorker?navigator.serviceWorker.getRegistrations().then(rs=>Promise.all(rs.map(r=>r.unregister()))):0,window.caches?caches.keys().then(ks=>Promise.all(ks.map(k=>caches.delete(k)))):0]).finally(go);setTimeout(go,1500)}catch(e){go()}}
 window.addEventListener('error',e=>{if(!BOOT.done)showFatal(e.message)});
@@ -549,7 +549,7 @@ function vLogin(){
   <label class="f">Email<input type="email" name="email" autocomplete="username" required></label>
   <label class="f">Password<input type="password" name="password" autocomplete="current-password" required></label>
   <button class="primary" style="width:100%">Accedi</button>
-  ${typeof sb.auth.signInWithPasskey==='function'&&window.PublicKeyCredential?`<button type="button" class="ghost" style="width:100%;margin-top:10px" data-act="passkeylogin">${/iPhone|iPad|Macintosh/.test(navigator.userAgent)?'Accedi con Face ID':'Accedi con passkey'}</button>`:''}
+  ${typeof sb.auth.signInWithPasskey==='function'&&window.PublicKeyCredential&&hasPasskeyHere()?`<button type="button" class="ghost" style="width:100%;margin-top:10px" data-act="passkeylogin">${/iPhone|iPad|Macintosh/.test(navigator.userAgent)?'Accedi con Face ID':'Accedi con passkey'}</button>`:''}
   <p class="muted" style="text-align:center">Password dimenticata? Chiedi alla direzione: ti genera una password temporanea da cambiare al primo accesso.</p></form>
   <div class="card" style="text-align:center"><b>Sei un responsabile?</b><p class="muted">Crea l'account della tua attività e aggiungi il personale.</p><button class="ghost" data-act="go" data-v="signup">Crea la tua attività</button></div>
   <p class="muted" style="text-align:center;font-size:13px"><a href="privacy.html">Informativa privacy</a></p></div>`;
@@ -1644,8 +1644,8 @@ Object.assign(A,{
   sndone(v){const[id,d]=v.split('|');run(()=>api('done_shift_note',{id,done:d==='1'}))},
   sndel(v){confirmBox('Eliminare questa consegna?','Elimina',()=>run(()=>api('done_shift_note',{id:v,delete:true}),'Eliminata'),true)},
   /* --- 17. Face ID --- */
-  async passkeylogin(){try{busy(true);const{error}=await sb.auth.signInWithPasskey();if(error)throw error}catch(e){toast(/cancel|abort|NotAllowed/i.test(String(e.message||e))?'Accesso annullato':'Face ID non disponibile: accedi con la password e attivalo dal tuo profilo.')}finally{busy(false)}},
-  async passkeyadd(){try{const{error}=await sb.auth.registerPasskey();if(error)throw error;closeModal();toast('Face ID attivato: dalla prossima volta accedi con un tocco')}catch(e){toast(/cancel|abort|NotAllowed/i.test(String(e.message||e))?'Operazione annullata':'Non riesco ad attivarlo ora: '+(e.message||e))}},
+  async passkeylogin(){try{busy(true);const{error}=await sb.auth.signInWithPasskey();if(error)throw error;markPasskey(true)}catch(e){toast(/cancel|abort|NotAllowed/i.test(String(e.message||e))?'Accesso annullato':'Face ID non disponibile: accedi con la password e attivalo dal tuo profilo.')}finally{busy(false)}},
+  async passkeyadd(){try{const{error}=await sb.auth.registerPasskey();if(error)throw error;markPasskey(true);closeModal();toast('Face ID attivato: dalla prossima volta accedi con un tocco')}catch(e){toast(/cancel|abort|NotAllowed/i.test(String(e.message||e))?'Operazione annullata':'Non riesco ad attivarlo ora: '+(e.message||e))}},
   /* --- 20. backup --- */
   async exportall(){try{const data=await api('export_data');download(`turnario-backup-${todayStr()}.json`,JSON.stringify(data,null,1),'application/json');toast('Backup scaricato')}catch(e){toast(e.message)}},
   exportcsv(){const rows=[['Team','Persona','Data','Turno','Inizio','Fine','Mansione']];
@@ -1653,6 +1653,8 @@ Object.assign(A,{
     download(`turni-${ui.month}.csv`,'﻿'+rows.map(r=>r.map(x=>/[;"\n]/.test(x)?`"${String(x).replace(/"/g,'""')}"`:x).join(';')).join('\n'),'text/csv')},
 });
 function download(name,content,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([content],{type}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000)}
+function hasPasskeyHere(){try{return localStorage.getItem('turnario:passkey')==='1'}catch(e){return false}}
+function markPasskey(on){try{on?localStorage.setItem('turnario:passkey','1'):localStorage.removeItem('turnario:passkey')}catch(e){}}
 const _profile=A.profile;
 A.profile=function(){_profile.apply(this,arguments);if(typeof sb.auth.registerPasskey!=='function'||!window.PublicKeyCredential)return;const box=document.querySelector('#modal .box');if(!box)return;
   const p=box.querySelector('label.f');if(p)p.insertAdjacentHTML('beforebegin',`<div class="info" style="margin:4px 0 14px"><b>Accesso con Face ID</b><br>Niente password: entri con il volto o l'impronta.<div class="row" style="margin-top:10px"><button class="ghost sm" data-act="passkeyadd">Attiva Face ID</button></div></div>`)};
